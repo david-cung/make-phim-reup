@@ -1,0 +1,87 @@
+[package]
+name = "local-movie-translator"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.79"
+description = "Offline-first desktop app that translates and dubs movies into Vietnamese."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "local_movie_translator_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "local-movie-translator"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+# Phase 12 — `tauri-plugin-log` intentionally removed. Our own
+# `tracing_subscriber` (see `logging.rs`) owns the process-wide
+# `log` dispatcher; both plugins fought over it and only one can
+# win. Our subscriber gives us JSON structured logs + daily
+# rotation + retention pruning, so the plugin was pure duplication.
+tauri-plugin-dialog = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+thiserror = "1"
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "time", "fs"] }
+
+rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
+
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+once_cell = "1"
+
+# Phase 2 (video engine)
+sha2 = "0.10"                 # fingerprint hash for cache keys
+fs4 = { version = "0.9", features = ["sync"] }  # cross-platform available-disk-space
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"                  # SIGTERM for graceful FFmpeg cancellation
+
+[features]
+# Custom protocol replaces the traditional Vite dev server for production builds.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+# Phase 12 — production-ready binary. `lto = "fat"` shaves ~10-15% off
+# the final size vs. the default thin LTO, at the cost of a slower
+# link. `codegen-units = 1` maximises cross-module inlining. `strip`
+# drops debug symbols so we ship a lean binary. We stay at
+# `opt-level = 3` because the Rust side still does non-trivial JSON
+# parsing, hashing and cache computation on hot paths — squeezing
+# for size ("z"/"s") measurably slowed transcript-to-subtitle
+# conversion in earlier phases.
+strip = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+debug = false
+
+# Phase 12 — a mirror of release that keeps line tables so a crash
+# report from the field can be resolved to source lines when the
+# user opts in to sharing the debug artefact. Enabled with
+# `cargo build --profile release-with-debug`.
+[profile.release-with-debug]
+inherits = "release"
+strip = "none"
+debug = 1
+
+[profile.dev]
+incremental = true

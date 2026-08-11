@@ -1,0 +1,37 @@
+# Node
+node_modules/
+dist/
+.pnpm-store/
+.pnpm-debug.log*
+.vite/
+*.tsbuildinfo
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/Cargo.lock.bak
+
+# Python
+.venv/
+.venv-worker/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# App runtime
+logs/
+*.log
+data/
+projects/
+
+# IDE
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "movie-translator-worker"
+version = "0.1.0"
+description = "Local Movie Translator — Python worker (Phase 1: stdlib only)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Local Movie Translator contributors" }]
+# Phase 1 intentionally has zero *required* runtime dependencies — the
+# worker uses only the Python standard library out of the box. Optional
+# extras below (`stt`, `translation`, `tts`) install the heavy ML
+# runtimes for their respective phases. A power user who only needs
+# subtitles can skip them entirely.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-timeout>=2"]
+stt = ["faster-whisper>=1.0", "huggingface_hub>=0.24"]
+translation = ["llama-cpp-python>=0.2.90"]
+tts = ["piper-tts>=1.2", "onnxruntime>=1.17"]
+
+[project.scripts]
+movie-translator-worker = "movie_translator_worker.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]

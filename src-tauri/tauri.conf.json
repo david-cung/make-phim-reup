@@ -1,0 +1,95 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Local Movie Translator",
+  "version": "0.1.0",
+  "identifier": "app.localmovietranslator",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Local Movie Translator",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "acceptFirstMouse": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; media-src 'self' asset: http://asset.localhost; connect-src ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Local Movie Translator",
+    "homepage": "https://github.com/local-movie-translator",
+    "icon": [
+      "icons/icon.png"
+    ],
+    "resources": [
+      "../python/src/movie_translator_worker/**/*"
+    ],
+    "externalBin": [],
+    "copyright": "Copyright © 2026 Local Movie Translator contributors",
+    "category": "Video",
+    "shortDescription": "Offline Vietnamese movie translator & dubber",
+    "longDescription": "Translate and dub movies into Vietnamese, entirely offline. Uses local Whisper for transcription, a local LLM for translation, and local TTS for voice. No cloud, no telemetry, no mandatory internet.",
+    "fileAssociations": [
+      {
+        "ext": ["mp4", "mkv", "mov", "m4v", "webm", "avi"],
+        "name": "Video",
+        "description": "Video file",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["srt"],
+        "name": "SubRip subtitle",
+        "description": "SubRip subtitle file",
+        "role": "Editor"
+      },
+      {
+        "ext": ["ass", "ssa"],
+        "name": "Advanced SubStation subtitle",
+        "description": "Advanced SubStation Alpha subtitle file",
+        "role": "Editor"
+      }
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "entitlements": null
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "allowDowngrades": true
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libssl3", "ffmpeg", "python3"]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {}
+}
