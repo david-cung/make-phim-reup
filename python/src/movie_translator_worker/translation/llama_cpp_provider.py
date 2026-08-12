@@ -27,6 +27,11 @@ from .registry import resolve_model_path
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# Rounds of repair after a chunk comes back with segments missing. The
+# final round degrades to one request per segment, so this is also the
+# point at which we stop trying and surface the failure.
+_MAX_REPAIR_ATTEMPTS = 3
+
 
 class LlamaCppTranslationProvider(TranslationProvider):
     """Runs local GGUF inference via ``llama_cpp.Llama``.
@@ -89,6 +94,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 chunk=chunk,
                 segments_by_id=segments_by_id,
                 options=options,
+                ctx=ctx,
             )
             translations.update(chunk_map)
             ctx.on_chunk_completed(chunk.chunk_index, chunk_map)
@@ -183,23 +189,18 @@ class LlamaCppTranslationProvider(TranslationProvider):
         self._release()
         return True
 
-    def _translate_one_chunk(
+    def _complete(
         self,
         *,
         llm: Any,
-        chunk: TranslationChunk,
-        segments_by_id: dict[int, TranslatedSegment],
+        messages: list[PromptMessage],
         options: TranslateOptions,
-    ) -> dict[int, str]:
-        messages = self._build_messages(
-            chunk=chunk,
-            segments_by_id=segments_by_id,
-            options=options,
-        )
+        temperature: float,
+    ) -> str:
         try:
             response = llm.create_chat_completion(
                 messages=[{"role": m.role, "content": m.content} for m in messages],
-                temperature=options.temperature,
+                temperature=temperature,
                 top_p=options.top_p,
                 max_tokens=options.max_tokens,
                 response_format={"type": "json_object"},
@@ -215,9 +216,120 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 RpcErrorCode.TRANSLATE_LLM_FAILURE,
                 f"llama.cpp inference failed: {e}",
             ) from e
+        return _extract_content(response)
 
-        raw = _extract_content(response)
-        return self._parse_response(raw, expected_ids=chunk.segment_ids)
+    def _attempt_ids(
+        self,
+        *,
+        llm: Any,
+        chunk: TranslationChunk,
+        segment_ids: list[int],
+        segments_by_id: dict[int, TranslatedSegment],
+        options: TranslateOptions,
+        temperature: float,
+    ) -> dict[int, str]:
+        """Ask for `segment_ids` only, keeping the chunk's context window.
+
+        Returns whatever parsed cleanly; callers decide what to do about
+        ids the model skipped. Malformed JSON yields nothing rather than
+        raising, so a retry at a different temperature still gets a shot.
+        """
+        sub = TranslationChunk(
+            chunk_index=chunk.chunk_index,
+            segment_ids=list(segment_ids),
+            context_before_ids=chunk.context_before_ids,
+            context_after_ids=chunk.context_after_ids,
+        )
+        messages = self._build_messages(
+            chunk=sub,
+            segments_by_id=segments_by_id,
+            options=options,
+        )
+        raw = self._complete(
+            llm=llm,
+            messages=messages,
+            options=options,
+            temperature=temperature,
+        )
+        try:
+            return self._parse_response(raw, expected_ids=segment_ids, strict=False)
+        except ProviderError:
+            # Unparseable output — treat as "nothing came back" so the
+            # escalation below can retry instead of killing the job.
+            return {}
+
+    def _translate_one_chunk(
+        self,
+        *,
+        llm: Any,
+        chunk: TranslationChunk,
+        segments_by_id: dict[int, TranslatedSegment],
+        options: TranslateOptions,
+        ctx: TranslateContext,
+    ) -> dict[int, str]:
+        """Translate a chunk, recovering from partial LLM responses.
+
+        Quantised models occasionally drop a line or two out of a
+        20-segment batch. Failing the whole job over that used to throw
+        away every chunk translated so far, so instead we escalate:
+        re-ask for just the stragglers (a smaller batch is markedly more
+        reliable), then one-by-one, nudging temperature up each round to
+        break the model out of whatever groove produced the bad output.
+        Only a segment that survives all of that is fatal.
+        """
+        translations = self._attempt_ids(
+            llm=llm,
+            chunk=chunk,
+            segment_ids=chunk.segment_ids,
+            segments_by_id=segments_by_id,
+            options=options,
+            temperature=options.temperature,
+        )
+        missing = [i for i in chunk.segment_ids if i not in translations]
+        if not missing:
+            return translations
+
+        for attempt in range(_MAX_REPAIR_ATTEMPTS):
+            if ctx.cancelled():
+                raise ProviderCancelled()
+            # Nudge off the deterministic path that just failed; cap so
+            # we never wander into incoherent territory.
+            temperature = min(1.0, options.temperature + 0.1 * (attempt + 1))
+            log.warn(
+                "translation chunk incomplete; retrying missing segments",
+                chunk=chunk.chunk_index,
+                missing=len(missing),
+                attempt=attempt + 1,
+            )
+            # Last resort: one request per segment. Slow, but a single
+            # line is about as easy as the task gets.
+            batches = (
+                [[i] for i in missing]
+                if attempt == _MAX_REPAIR_ATTEMPTS - 1
+                else [missing]
+            )
+            for batch in batches:
+                if ctx.cancelled():
+                    raise ProviderCancelled()
+                translations.update(
+                    self._attempt_ids(
+                        llm=llm,
+                        chunk=chunk,
+                        segment_ids=batch,
+                        segments_by_id=segments_by_id,
+                        options=options,
+                        temperature=temperature,
+                    )
+                )
+            missing = [i for i in chunk.segment_ids if i not in translations]
+            if not missing:
+                return translations
+
+        raise ProviderError(
+            RpcErrorCode.TRANSLATE_INCOMPLETE_RESPONSE,
+            f"LLM kept omitting segment ids after {_MAX_REPAIR_ATTEMPTS} retries: "
+            f"{missing[:10]}{'…' if len(missing) > 10 else ''}",
+        )
 
     def _build_messages(
         self,
@@ -241,7 +353,15 @@ class LlamaCppTranslationProvider(TranslationProvider):
         )
 
     @staticmethod
-    def _parse_response(text: str, *, expected_ids: list[int]) -> dict[int, str]:
+    def _parse_response(
+        text: str, *, expected_ids: list[int], strict: bool = True
+    ) -> dict[int, str]:
+        """Pull `{id: translation}` out of the model's JSON.
+
+        With ``strict=False`` a response that omits some requested ids is
+        returned as-is instead of raising, letting the caller retry just
+        the stragglers.
+        """
         payload = _coerce_json(text)
         if not isinstance(payload, dict):
             raise ProviderError(
@@ -272,7 +392,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 continue
             translations[sid] = str(translation).strip()
         missing = [i for i in expected_ids if i not in translations]
-        if missing:
+        if missing and strict:
             raise ProviderError(
                 RpcErrorCode.TRANSLATE_INCOMPLETE_RESPONSE,
                 f"LLM response missed segment ids: {missing[:10]}{'…' if len(missing) > 10 else ''}",
