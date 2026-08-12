@@ -49,8 +49,7 @@ use crate::projects::ProjectService;
 use crate::subtitles::{srt as srt_writer, SubtitleCacheFile, SubtitleDoc, SubtitleService};
 
 use super::cache::{
-    default_render_output_path, default_subtitle_output_path, RenderCacheFile,
-    RENDER_MANIFEST_RELATIVE,
+    default_render_output_path, subtitle_sidecar_path, RenderCacheFile, RENDER_MANIFEST_RELATIVE,
 };
 use super::errors::RenderError;
 use super::ffmpeg_cmd::build_render_command;
@@ -257,10 +256,17 @@ impl RenderService {
             })?;
         }
 
-        // Write the external SRT sidecar up-front. We always place it
-        // in the project's `output/` folder — the burn path also
-        // reads it from there.
-        let subtitle_sidecar_path = default_subtitle_output_path(&project_root);
+        // Write the SRT up-front. Where it goes depends on what it is
+        // for:
+        //
+        // * `Burned` only needs it as an input to FFmpeg's `subtitles=`
+        //   filter, so the project's `output/` folder is fine.
+        // * `External` makes the file part of the deliverable. It has to
+        //   sit beside the movie and share its stem, or no player will
+        //   pick it up — and when the user renders to a custom path
+        //   (say `~/Downloads`), the project folder is nowhere near it.
+        let subtitle_sidecar_path =
+            subtitle_sidecar_path(&project_root, &output_path, settings.subtitle_mode);
         let needs_sidecar = matches!(
             settings.subtitle_mode,
             SubtitleMode::External | SubtitleMode::Burned

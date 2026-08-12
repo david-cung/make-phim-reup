@@ -14,6 +14,7 @@ use crate::mix::MixSettings;
 use crate::subtitles::models::DerivedFrom;
 use crate::subtitles::{DirtyFlags, SubtitleDoc, SubtitleSegment};
 
+use super::cache::{default_subtitle_output_path, subtitle_sidecar_path};
 use super::ffmpeg_cmd::{build_render_command, build_subtitles_filter};
 use super::models::{
     build_render_cache_key, AudioCodec, OutputFormat, RenderSettings, RenderStatus, SubtitleMode,
@@ -342,6 +343,43 @@ fn mkv_output_omits_faststart_flag() {
 // -----------------------------------------------------------------
 // Subtitles filter escaping
 // -----------------------------------------------------------------
+
+// -----------------------------------------------------------------
+// Sidecar placement
+// -----------------------------------------------------------------
+
+/// We shipped the sidecar into the project's `output/` folder no matter
+/// where the movie went, so rendering to `~/Downloads` left the SRT
+/// stranded in Application Support and every player showed no subtitles.
+#[test]
+fn external_sidecar_lands_next_to_a_custom_output_path() {
+    let project = Path::new("/data/projects/abc");
+    let out = Path::new("/Users/dc/Downloads/movie_vi.mp4");
+    let subs = subtitle_sidecar_path(project, out, SubtitleMode::External);
+    assert_eq!(subs, PathBuf::from("/Users/dc/Downloads/movie_vi.srt"));
+    assert_eq!(subs.parent(), out.parent(), "player needs them side by side");
+}
+
+#[test]
+fn external_sidecar_matches_the_movie_stem() {
+    let project = Path::new("/data/projects/abc");
+    let out = Path::new("/tmp/My Film (1080p).mkv");
+    let subs = subtitle_sidecar_path(project, out, SubtitleMode::External);
+    assert_eq!(subs, PathBuf::from("/tmp/My Film (1080p).srt"));
+}
+
+/// Burned mode only feeds FFmpeg's `subtitles=` filter, so the file is an
+/// intermediate and belongs inside the project rather than beside the
+/// user's movie.
+#[test]
+fn burned_sidecar_stays_inside_the_project() {
+    let project = Path::new("/data/projects/abc");
+    let out = Path::new("/Users/dc/Downloads/movie_vi.mp4");
+    assert_eq!(
+        subtitle_sidecar_path(project, out, SubtitleMode::Burned),
+        default_subtitle_output_path(project),
+    );
+}
 
 #[test]
 fn subtitles_filter_wraps_path_in_single_quotes() {
