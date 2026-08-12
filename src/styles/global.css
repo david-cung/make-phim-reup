@@ -276,6 +276,18 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .btn.icon:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); border-color: transparent; }
 .btn.icon.on { color: var(--accent); background: var(--accent-soft); }
 
+/* Inline spinner for buttons running a long task (e.g. "Run all"). */
+.spinner {
+  width: 12px; height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 700ms linear infinite;
+  opacity: .85;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Compact action row */
 .actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; }
 .actions.right { justify-content: flex-end; }

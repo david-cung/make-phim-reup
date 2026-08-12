@@ -537,18 +537,182 @@ export default function ProjectView() {
     return null;
   }, [jobsById, project]);
 
+  // -----------------------------------------------------------------------
+  // UI-only state (introduced by the professional editor redesign).
+  //
+  // These must stay above the `!project` early return below: React
+  // requires an identical hook sequence on every render, and `project`
+  // is null on the first paint while `openProject` resolves.
+  //
+  // The rest of ProjectView still owns every backend action and store
+  // subscription; these flags only drive which panels are visible in
+  // the workspace and which subtitle the inspector describes.
+  // -----------------------------------------------------------------------
+  const [section, setSection] = useState<EditorSection>("media");
+  const [selectedSubtitleId, setSelectedSubtitleId] = useState<number | null>(
+    null,
+  );
+
+  // "Run all" pipeline state. `pipelineStep` doubles as the running
+  // flag (non-null while the chain is in flight) and as the label the
+  // topbar button shows. The abort flag is a ref rather than state so
+  // the async chain reads the latest value without being restarted by
+  // a re-render.
+  const [pipelineStep, setPipelineStep] = useState<string | null>(null);
+  const pipelineAbortRef = useRef(false);
+
+  // When the video reaches a new subtitle line we quietly follow it in
+  // the inspector so the user always sees context for the current
+  // playhead position. Explicit selections (clicking a row) win.
+  const activeSubtitleIdFromTime = useMemo(
+    () => findActiveSubtitleId(subtitleDoc, videoTime),
+    [subtitleDoc, videoTime],
+  );
+  const effectiveSubtitleId = selectedSubtitleId ?? activeSubtitleIdFromTime;
+
+  const sourceMediaPath = project?.sourceMediaPath ?? null;
+
+  const workflow = useMemo(
+    () =>
+      computeWorkflow({
+        hasSource: !!sourceMediaPath,
+        hasAudio: !!media?.audioAbsolutePath,
+        hasTranscript: !!media?.transcript,
+        translationRatio:
+          media?.translation && media?.transcript
+            ? media.translation.translatedCount /
+              Math.max(1, media.translation.segmentCount)
+            : 0,
+        ttsRatio:
+          media?.tts && media.tts.subtitleCount > 0
+            ? media.tts.generatedCount / Math.max(1, media.tts.subtitleCount)
+            : 0,
+        syncRatio:
+          media?.sync && media.sync.subtitleCount > 0
+            ? media.sync.syncedCount / Math.max(1, media.sync.subtitleCount)
+            : 0,
+        mixReady: media?.mix?.status === "ready",
+        renderReady: media?.render?.status === "ready",
+        active: {
+          extract: !!activeExtractionJob,
+          transcribe: !!activeTranscribeJob,
+          translate: !!activeTranslateJob,
+          tts: !!activeTtsJob,
+          sync: !!activeSyncJob,
+          mix: !!activeMixJob,
+          render: !!activeRenderJob,
+        },
+      }),
+    [
+      sourceMediaPath,
+      media,
+      activeExtractionJob,
+      activeTranscribeJob,
+      activeTranslateJob,
+      activeTtsJob,
+      activeSyncJob,
+      activeMixJob,
+      activeRenderJob,
+    ],
+  );
+
+  const activeProcessing = useMemo(
+    () =>
+      [
+        activeExtractionJob && {
+          label: "Extracting audio",
+          job: activeExtractionJob,
+        },
+        activeTranscribeJob && {
+          label: "Transcribing",
+          job: activeTranscribeJob,
+        },
+        activeTranslateJob && {
+          label: "Translating",
+          job: activeTranslateJob,
+        },
+        activeTtsJob && { label: "Generating voice", job: activeTtsJob },
+        activeSyncJob && { label: "Syncing voice", job: activeSyncJob },
+        activeMixJob && { label: "Mixing audio", job: activeMixJob },
+        activeRenderJob && { label: "Rendering movie", job: activeRenderJob },
+        activeDownloadJob && {
+          label: "Downloading Whisper model",
+          job: activeDownloadJob,
+        },
+        activeTranslateDownloadJob && {
+          label: "Downloading translation model",
+          job: activeTranslateDownloadJob,
+        },
+        activeTtsDownloadJob && {
+          label: "Downloading voice",
+          job: activeTtsDownloadJob,
+        },
+      ].filter(Boolean) as { label: string; job: JobSnapshot }[],
+    [
+      activeExtractionJob,
+      activeTranscribeJob,
+      activeTranslateJob,
+      activeTtsJob,
+      activeSyncJob,
+      activeMixJob,
+      activeRenderJob,
+      activeDownloadJob,
+      activeTranslateDownloadJob,
+      activeTtsDownloadJob,
+    ],
+  );
+
+  // Video preview helpers — the dark stage toolbar owns play/pause and
+  // drives the underlying <video> ref directly, so we don't have to
+  // fork the existing VideoPreview component.
+  const [isPlaying, setIsPlaying] = useState(false);
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    el.addEventListener("play", onPlay);
+    el.addEventListener("pause", onPause);
+    el.addEventListener("ended", onPause);
+    return () => {
+      el.removeEventListener("play", onPlay);
+      el.removeEventListener("pause", onPause);
+      el.removeEventListener("ended", onPause);
+    };
+  }, [sourceMediaPath]);
+  const togglePlayback = () => {
+    const el = videoRef.current;
+    if (!el) return;
+    if (el.paused) void el.play();
+    else el.pause();
+  };
+
   if (error) {
     return (
-      <div className="error-panel">
-        <h2>Cannot open project</h2>
-        <pre>{error}</pre>
-        <Link to="/">← Back to dashboard</Link>
+      <div className="app-shell">
+        <TopBar showBackToDashboard showDefaultTools={false} />
+        <main className="app-body plain">
+          <div className="error-panel">
+            <h2>Cannot open project</h2>
+            <pre>{error}</pre>
+            <Link to="/" className="btn" style={{ marginTop: 12 }}>
+              Back to dashboard
+            </Link>
+          </div>
+        </main>
       </div>
     );
   }
 
   if (!project) {
-    return <div className="loading">Loading project…</div>;
+    return (
+      <div className="app-shell">
+        <TopBar showBackToDashboard showDefaultTools={false} />
+        <main className="app-body plain">
+          <div className="loading">Loading project…</div>
+        </main>
+      </div>
+    );
   }
 
   const handleImport = async (copy: boolean) => {
@@ -634,76 +798,75 @@ export default function ProjectView() {
     return true;
   };
 
+  /// Phase 12 UX — make sure the Whisper model the user picked is on
+  /// disk before we ask the worker to transcribe with it. Returns
+  /// `true` when the model is ready, `false` when the user declined
+  /// the download (or cancelled it), and throws on hard failure.
+  const ensureWhisperModelReady = async (): Promise<boolean> => {
+    const chosen = whisperModels.find((m) => m.name === sttOptions.model);
+    if (!chosen || chosen.installed) return true;
+
+    const startedAt = Date.now();
+    try {
+      await downloadWhisperModel(chosen.name);
+    } catch (dlErr) {
+      // Offline Mode blocks the ONE HTTP entry point in the app.
+      // Rather than showing the raw error and sending the user off to
+      // Settings, offer to flip it off in-place and retry — otherwise
+      // this is a dead end.
+      if (isAppError(dlErr) && dlErr.code === "MODEL_NETWORK_DISABLED") {
+        const proceed = window.confirm(
+          `To download the "${chosen.name}" model, the app needs one-time network access.\n\n` +
+            `Offline Mode is currently ON, which is blocking the download.\n\n` +
+            `Turn Offline Mode OFF and download now?\n` +
+            `(You can turn it back on in Settings once the download finishes — the model works fully offline afterwards.)`,
+        );
+        if (!proceed) return false;
+        await updateSettings({ offlineMode: false });
+        await downloadWhisperModel(chosen.name);
+      } else {
+        throw dlErr;
+      }
+    }
+
+    const dlJobId = findLatestDownloadJobId(startedAt);
+    if (dlJobId) {
+      const result = await waitForJobTerminal(dlJobId);
+      if (result.status === "cancelled") return false;
+      if (result.status === "failed") {
+        throw new Error(
+          result.errorMessage ||
+            `Model download failed (${chosen.name}${
+              result.errorCode ? ` — ${result.errorCode}` : ""
+            }).`,
+        );
+      }
+    }
+    await refreshWhisperModels();
+    const after = useAppStore
+      .getState()
+      .whisperModels.find((m) => m.name === chosen.name);
+    if (!after?.installed) {
+      throw new Error(
+        `Model ${chosen.name} did not appear installed after download.`,
+      );
+    }
+    return true;
+  };
+
   const handleTranscribe = async () => {
     if (!project) return;
     setError(null);
     setBusy(true);
     try {
-      // Phase 12 UX — chain the two mandatory prerequisites for
-      // transcription so the user only has to click "Transcribe":
-      //   1. If audio hasn't been extracted yet (fresh import),
-      //      run FFmpeg to produce the 16 kHz mono WAV Whisper
-      //      needs. This unblocks the entire STT panel — previously
-      //      users had to hunt for the "Extract audio" button first.
-      //   2. If the chosen Whisper model isn't downloaded yet,
-      //      transparently pull it. The download surfaces via
-      //      `activeDownloadJob` and drives the existing progress
-      //      UI; once it finishes we refresh the registry (so
-      //      `installed` flips to true) and fall through to the
-      //      real transcribe call.
+      // Phase 12 UX — chain the two mandatory prerequisites so the
+      // user only has to click "Transcribe": extract the 16 kHz mono
+      // WAV Whisper needs, then pull the model if it isn't on disk.
+      // Both steps surface through the existing progress UI.
       const audioReady = await ensureAudioExtracted();
       if (!audioReady) return;
-
-      const chosen = whisperModels.find((m) => m.name === sttOptions.model);
-      if (chosen && !chosen.installed) {
-        const startedAt = Date.now();
-        try {
-          await downloadWhisperModel(chosen.name);
-        } catch (dlErr) {
-          // Phase 12 UX — Offline Mode blocks the ONE HTTP entry
-          // point in the app. Rather than showing the raw error and
-          // sending the user off to Settings, offer to flip Offline
-          // Mode off in-place and retry. This is a one-click
-          // recovery for what is otherwise a dead end.
-          if (isAppError(dlErr) && dlErr.code === "MODEL_NETWORK_DISABLED") {
-            const proceed = window.confirm(
-              `To download the "${chosen.name}" model, the app needs one-time network access.\n\n` +
-                `Offline Mode is currently ON, which is blocking the download.\n\n` +
-                `Turn Offline Mode OFF and download now?\n` +
-                `(You can turn it back on in Settings once the download finishes — the model works fully offline afterwards.)`,
-            );
-            if (!proceed) return;
-            await updateSettings({ offlineMode: false });
-            await downloadWhisperModel(chosen.name);
-          } else {
-            throw dlErr;
-          }
-        }
-        const dlJobId = findLatestDownloadJobId(startedAt);
-        if (dlJobId) {
-          const result = await waitForJobTerminal(dlJobId);
-          if (result.status === "cancelled") {
-            return;
-          }
-          if (result.status === "failed") {
-            throw new Error(
-              result.errorMessage ||
-                `Model download failed (${chosen.name}${
-                  result.errorCode ? ` — ${result.errorCode}` : ""
-                }).`,
-            );
-          }
-        }
-        await refreshWhisperModels();
-        const after = useAppStore
-          .getState()
-          .whisperModels.find((m) => m.name === chosen.name);
-        if (!after?.installed) {
-          throw new Error(
-            `Model ${chosen.name} did not appear installed after download.`,
-          );
-        }
-      }
+      const modelReady = await ensureWhisperModelReady();
+      if (!modelReady) return;
       await startTranscribe(project.id, sttOptions);
     } catch (e) {
       setError(formatError(e));
@@ -781,108 +944,102 @@ export default function ProjectView() {
     }
   };
 
+  /// Phase 12 UX — mirror of `ensureWhisperModelReady` for the GGUF
+  /// side. If the user has no translation model installed (or the one
+  /// they picked has disappeared from disk) we pull the recommended
+  /// preset from HuggingFace. Returns the `TranslateOptions` to run
+  /// with — the caller must use these rather than `translateOptions`,
+  /// because a freshly downloaded model has to be wired into `.model`
+  /// and React state won't have committed yet. Returns `null` when
+  /// the user cancelled.
+  const ensureTranslationModelReady =
+    async (): Promise<TranslateOptions | null> => {
+      const chosenModelPresent =
+        !!translateOptions.model &&
+        translationModels.some((m) => m.name === translateOptions.model);
+      if (chosenModelPresent) return translateOptions;
+
+      // `is_default` in the Python registry marks exactly one entry as
+      // the preferred first-time download (a ~2 GB Qwen 2.5 3B, a good
+      // quality/size balance on any modern Mac).
+      const preset =
+        translationRecommendedPresets.find((p) => p.isDefault) ??
+        translationRecommendedPresets[0];
+      if (!preset) {
+        throw new Error(
+          "No translation model is installed and no recommended presets are available. Drop a GGUF file into the translation models directory manually.",
+        );
+      }
+
+      const startedAt = Date.now();
+      const runDownload = async () => {
+        await downloadTranslationModel(preset.preset);
+        const dlJobId = findLatestDownloadJobId(startedAt, "translate");
+        if (!dlJobId) return;
+        const result = await waitForJobTerminal(dlJobId);
+        if (result.status === "cancelled") {
+          // Stable sentinel so the caller can bail silently instead of
+          // turning a deliberate cancel into a red error banner.
+          const err = new Error("cancelled");
+          (err as { code?: string }).code = "USER_CANCELLED";
+          throw err;
+        }
+        if (result.status === "failed") {
+          throw new Error(
+            result.errorMessage ||
+              `Model download failed (${preset.label}${
+                result.errorCode ? ` — ${result.errorCode}` : ""
+              }).`,
+          );
+        }
+      };
+
+      try {
+        try {
+          await runDownload();
+        } catch (dlErr) {
+          if (isAppError(dlErr) && dlErr.code === "MODEL_NETWORK_DISABLED") {
+            const proceed = window.confirm(
+              `To download the translation model "${preset.label}", the app needs one-time network access.\n\n` +
+                `Offline Mode is currently ON, which is blocking the download.\n\n` +
+                `Turn Offline Mode OFF and download now?\n` +
+                `(You can turn it back on in Settings once the download finishes — the model works fully offline afterwards.)`,
+            );
+            if (!proceed) return null;
+            await updateSettings({ offlineMode: false });
+            await runDownload();
+          } else {
+            throw dlErr;
+          }
+        }
+      } catch (e) {
+        if ((e as { code?: string })?.code === "USER_CANCELLED") return null;
+        throw e;
+      }
+
+      const fresh = await refreshTranslationModels();
+      const installed =
+        fresh.find((m) => m.name === preset.filename) ??
+        fresh.find((m) => m.isDefault) ??
+        fresh[0];
+      if (!installed) {
+        throw new Error(
+          `Model ${preset.filename} did not appear installed after download.`,
+        );
+      }
+      const nextOpts = { ...translateOptions, model: installed.name };
+      setTranslateOptions(nextOpts);
+      return nextOpts;
+    };
+
   const handleTranslate = async () => {
     if (!project) return;
     setError(null);
     setBusy(true);
     try {
-      // Phase 12 UX — mirror of `handleTranscribe`. If the user has
-      // no GGUF installed at all (or the model they picked has
-      // disappeared from disk), transparently pull the recommended
-      // preset from HuggingFace before starting translation. This
-      // is the whole point of the "user just clicks Translate"
-      // requirement: no manual model-picking dance, no digging into
-      // Settings, no separate download button to hunt for.
-      const chosenModelPresent =
-        !!translateOptions.model &&
-        translationModels.some((m) => m.name === translateOptions.model);
-      if (!chosenModelPresent) {
-        // Pick the default from the curated preset list. `is_default`
-        // in the Python registry marks exactly one entry as the
-        // preferred first-time download (a ~2 GB Qwen 2.5 3B for
-        // balanced quality/size on any modern Mac).
-        const preset =
-          translationRecommendedPresets.find((p) => p.isDefault) ??
-          translationRecommendedPresets[0];
-        if (!preset) {
-          throw new Error(
-            "No translation model is installed and no recommended presets are available. Drop a GGUF file into the translation models directory manually.",
-          );
-        }
-        const startedAt = Date.now();
-        const runDownload = async () => {
-          await downloadTranslationModel(preset.preset);
-          const dlJobId = findLatestDownloadJobId(startedAt, "translate");
-          if (!dlJobId) return;
-          const result = await waitForJobTerminal(dlJobId);
-          if (result.status === "cancelled") {
-            // Bubble a stable sentinel so the caller can bail
-            // silently without turning cancellation into a red error
-            // banner.
-            const err = new Error("cancelled");
-            (err as { code?: string }).code = "USER_CANCELLED";
-            throw err;
-          }
-          if (result.status === "failed") {
-            throw new Error(
-              result.errorMessage ||
-                `Model download failed (${preset.label}${
-                  result.errorCode ? ` — ${result.errorCode}` : ""
-                }).`,
-            );
-          }
-        };
-        try {
-          try {
-            await runDownload();
-          } catch (dlErr) {
-            // Same Offline-Mode one-click recovery as
-            // `handleTranscribe`. `MODEL_NETWORK_DISABLED` is the
-            // single structured code the download command emits
-            // when Offline Mode is on.
-            if (
-              isAppError(dlErr) &&
-              dlErr.code === "MODEL_NETWORK_DISABLED"
-            ) {
-              const proceed = window.confirm(
-                `To download the translation model "${preset.label}", the app needs one-time network access.\n\n` +
-                  `Offline Mode is currently ON, which is blocking the download.\n\n` +
-                  `Turn Offline Mode OFF and download now?\n` +
-                  `(You can turn it back on in Settings once the download finishes — the model works fully offline afterwards.)`,
-              );
-              if (!proceed) return;
-              await updateSettings({ offlineMode: false });
-              await runDownload();
-            } else {
-              throw dlErr;
-            }
-          }
-        } catch (e) {
-          if ((e as { code?: string })?.code === "USER_CANCELLED") return;
-          throw e;
-        }
-
-        // Refresh the model list, then wire the just-installed GGUF
-        // into `translateOptions.model` so `translate.translate`
-        // resolves it on the worker side. Falls back to the file
-        // name in the preset if the registry rescan hasn't caught
-        // up yet.
-        const fresh = await refreshTranslationModels();
-        const installed =
-          fresh.find((m) => m.name === preset.filename) ??
-          fresh.find((m) => m.isDefault) ??
-          fresh[0];
-        if (!installed) {
-          throw new Error(
-            `Model ${preset.filename} did not appear installed after download.`,
-          );
-        }
-        const nextOpts = { ...translateOptions, model: installed.name };
-        setTranslateOptions(nextOpts);
-        await startTranslate(project.id, nextOpts);
-        return;
-      }
-      await startTranslate(project.id, translateOptions);
+      const opts = await ensureTranslationModelReady();
+      if (!opts) return;
+      await startTranslate(project.id, opts);
     } catch (e) {
       setError(formatError(e));
     } finally {
@@ -1314,145 +1471,6 @@ export default function ProjectView() {
     setRenderSettings({ outputPath: null });
   };
 
-  // -----------------------------------------------------------------------
-  // UI-only state (introduced by the professional editor redesign).
-  //
-  // The rest of ProjectView still owns every backend action and store
-  // subscription; these two flags simply drive which panels are visible
-  // in the workspace, and which subtitle is highlighted in the right
-  // inspector. Nothing here mutates persisted data.
-  // -----------------------------------------------------------------------
-  const [section, setSection] = useState<EditorSection>("media");
-  const [selectedSubtitleId, setSelectedSubtitleId] = useState<number | null>(
-    null,
-  );
-
-  // When the video reaches a new subtitle line we quietly follow it in
-  // the inspector so the user always sees context for the current
-  // playhead position. Explicit selections (clicking a row) win — they
-  // override this auto-follow behaviour via the check inside the
-  // component that renders the inspector.
-  const activeSubtitleIdFromTime = useMemo(
-    () => findActiveSubtitleId(subtitleDoc, videoTime),
-    [subtitleDoc, videoTime],
-  );
-  const effectiveSubtitleId = selectedSubtitleId ?? activeSubtitleIdFromTime;
-
-  const workflow = useMemo(
-    () =>
-      computeWorkflow({
-        hasSource: !!project.sourceMediaPath,
-        hasAudio: !!media?.audioAbsolutePath,
-        hasTranscript: !!media?.transcript,
-        translationRatio:
-          media?.translation && media?.transcript
-            ? media.translation.translatedCount /
-              Math.max(1, media.translation.segmentCount)
-            : 0,
-        ttsRatio:
-          media?.tts && media.tts.subtitleCount > 0
-            ? media.tts.generatedCount / Math.max(1, media.tts.subtitleCount)
-            : 0,
-        syncRatio:
-          media?.sync && media.sync.subtitleCount > 0
-            ? media.sync.syncedCount / Math.max(1, media.sync.subtitleCount)
-            : 0,
-        mixReady: media?.mix?.status === "ready",
-        renderReady: media?.render?.status === "ready",
-        active: {
-          extract: !!activeExtractionJob,
-          transcribe: !!activeTranscribeJob,
-          translate: !!activeTranslateJob,
-          tts: !!activeTtsJob,
-          sync: !!activeSyncJob,
-          mix: !!activeMixJob,
-          render: !!activeRenderJob,
-        },
-      }),
-    [
-      project.sourceMediaPath,
-      media,
-      activeExtractionJob,
-      activeTranscribeJob,
-      activeTranslateJob,
-      activeTtsJob,
-      activeSyncJob,
-      activeMixJob,
-      activeRenderJob,
-    ],
-  );
-
-  const activeProcessing = useMemo(
-    () =>
-      [
-        activeExtractionJob && {
-          label: "Extracting audio",
-          job: activeExtractionJob,
-        },
-        activeTranscribeJob && {
-          label: "Transcribing",
-          job: activeTranscribeJob,
-        },
-        activeTranslateJob && {
-          label: "Translating",
-          job: activeTranslateJob,
-        },
-        activeTtsJob && { label: "Generating voice", job: activeTtsJob },
-        activeSyncJob && { label: "Syncing voice", job: activeSyncJob },
-        activeMixJob && { label: "Mixing audio", job: activeMixJob },
-        activeRenderJob && { label: "Rendering movie", job: activeRenderJob },
-        activeDownloadJob && {
-          label: "Downloading Whisper model",
-          job: activeDownloadJob,
-        },
-        activeTranslateDownloadJob && {
-          label: "Downloading translation model",
-          job: activeTranslateDownloadJob,
-        },
-        activeTtsDownloadJob && {
-          label: "Downloading voice",
-          job: activeTtsDownloadJob,
-        },
-      ].filter(Boolean) as { label: string; job: JobSnapshot }[],
-    [
-      activeExtractionJob,
-      activeTranscribeJob,
-      activeTranslateJob,
-      activeTtsJob,
-      activeSyncJob,
-      activeMixJob,
-      activeRenderJob,
-      activeDownloadJob,
-      activeTranslateDownloadJob,
-      activeTtsDownloadJob,
-    ],
-  );
-
-  // Video preview helpers — we use a togglable play/pause button in the
-  // dark stage toolbar, wired directly to the underlying <video> ref so
-  // we don't need to fork the existing VideoPreview component.
-  const [isPlaying, setIsPlaying] = useState(false);
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el) return;
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-    el.addEventListener("play", onPlay);
-    el.addEventListener("pause", onPause);
-    el.addEventListener("ended", onPause);
-    return () => {
-      el.removeEventListener("play", onPlay);
-      el.removeEventListener("pause", onPause);
-      el.removeEventListener("ended", onPause);
-    };
-  }, [project.sourceMediaPath]);
-  const togglePlayback = () => {
-    const el = videoRef.current;
-    if (!el) return;
-    if (el.paused) void el.play();
-    else el.pause();
-  };
-
   // Export CTA in the topbar jumps to the AI section and scrolls to the
   // render panel — the actual render is still initiated from RenderPanel
   // so we keep a single source of truth for the FFmpeg command.
@@ -1464,6 +1482,158 @@ export default function ProjectView() {
         .getElementById("panel-render")
         ?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+  };
+
+  // -----------------------------------------------------------------------
+  // "Run all" — drive the whole pipeline from one click.
+  //
+  // Each `start*` store action shares the same contract: it resolves to
+  // a summary when the work was already cached, or to `null` after
+  // seeding a job snapshot. `runStage` uses that to decide whether it
+  // needs to wait, so stages that are already up to date cost one IPC
+  // round-trip and are skipped instantly. That makes the whole chain
+  // resumable — re-running after a failure picks up where it stopped
+  // rather than redoing finished work.
+  // -----------------------------------------------------------------------
+  const PIPELINE_CANCELLED = "PIPELINE_CANCELLED";
+
+  const throwIfAborted = () => {
+    if (pipelineAbortRef.current) {
+      const err = new Error("cancelled");
+      (err as { code?: string }).code = PIPELINE_CANCELLED;
+      throw err;
+    }
+  };
+
+  /// Start one stage and block until its job reaches a terminal state.
+  /// A non-null result from `start` means the backend served it from
+  /// cache and no job exists to wait on.
+  const runStage = async (
+    stage: JobSnapshot["stage"],
+    start: () => Promise<unknown>,
+  ): Promise<void> => {
+    throwIfAborted();
+    const cached = await start();
+    if (cached != null) return;
+
+    const parseTs = (s: string | null | undefined) =>
+      s ? Date.parse(s) || 0 : 0;
+    const job = Object.values(useAppStore.getState().jobsById)
+      .filter((j) => j.projectId === project.id && j.stage === stage)
+      .sort((a, b) => parseTs(b.createdAt) - parseTs(a.createdAt))[0];
+    if (!job || isTerminalStatus(job.status)) return;
+
+    const result = await waitForJobTerminal(job.id);
+    if (result.status === "cancelled") {
+      const err = new Error("cancelled");
+      (err as { code?: string }).code = PIPELINE_CANCELLED;
+      throw err;
+    }
+    if (result.status === "failed") {
+      throw new Error(
+        result.errorMessage ||
+          `${stage} failed${result.errorCode ? ` — ${result.errorCode}` : ""}.`,
+      );
+    }
+  };
+
+  const handleRunAll = async () => {
+    if (!project.sourceMediaPath) {
+      setError("Import a video first, then run the pipeline.");
+      setSection("media");
+      return;
+    }
+    pipelineAbortRef.current = false;
+    setError(null);
+    setBusy(true);
+    try {
+      const fresh = () => useAppStore.getState().currentMedia;
+
+      setPipelineStep("Extracting audio");
+      setSection("media");
+      const audioReady = await ensureAudioExtracted();
+      if (!audioReady) return;
+      throwIfAborted();
+
+      if (!fresh()?.transcript) {
+        setPipelineStep("Transcribing");
+        setSection("transcription");
+        const modelReady = await ensureWhisperModelReady();
+        if (!modelReady) return;
+        await runStage("transcribe", () =>
+          startTranscribe(project.id, sttOptions),
+        );
+      }
+
+      const tr = fresh()?.translation;
+      const needsTranslation =
+        !tr || tr.translatedCount < tr.segmentCount || tr.segmentCount === 0;
+      if (needsTranslation) {
+        setPipelineStep("Translating");
+        setSection("translation");
+        const opts = await ensureTranslationModelReady();
+        if (!opts) return;
+        await runStage("translate", () => startTranslate(project.id, opts));
+      }
+
+      // `onJobUpdate` auto-rebuilds subtitles once translation lands,
+      // but that fires off a promise we can't await from here — and it
+      // never runs at all when translation was served from cache. Build
+      // explicitly so the dubbing stages below always have a document.
+      if (!useAppStore.getState().currentSubtitleDoc) {
+        setPipelineStep("Building subtitles");
+        setSection("subtitles");
+        await rebuildSubtitles(project.id);
+      }
+      throwIfAborted();
+
+      setPipelineStep("Generating voice");
+      setSection("voices");
+      const voiceReady = await ensureTtsVoiceReady();
+      if (!voiceReady) return;
+      await runStage("tts", () =>
+        startGenerateTts(project.id, { kind: "missing" }),
+      );
+
+      setPipelineStep("Syncing voice");
+      await runStage("sync", () =>
+        startApplySync(project.id, { kind: "missing" }),
+      );
+
+      setPipelineStep("Mixing audio");
+      setSection("mix");
+      await runStage("mix", () => startApplyMix(project.id));
+
+      setPipelineStep("Rendering movie");
+      setSection("render");
+      await runStage("render", () => startApplyRender(project.id, {}));
+
+      setPipelineStep(null);
+      await useAppStore.getState().refreshMedia(project.id);
+    } catch (e) {
+      if ((e as { code?: string })?.code !== PIPELINE_CANCELLED) {
+        setError(formatError(e));
+      }
+    } finally {
+      pipelineAbortRef.current = false;
+      setPipelineStep(null);
+      setBusy(false);
+    }
+  };
+
+  /// Stop the chain after the current stage. We also cancel whatever
+  /// job is in flight so the user isn't left waiting on a long FFmpeg
+  /// pass they already abandoned.
+  const handleCancelRunAll = async () => {
+    pipelineAbortRef.current = true;
+    const inFlight = activeProcessing[0]?.job;
+    if (inFlight) {
+      try {
+        await cancelJob(inFlight.id);
+      } catch (e) {
+        setError(formatError(e));
+      }
+    }
   };
 
   return (
@@ -1482,7 +1652,30 @@ export default function ProjectView() {
             </span>
           </div>
         }
-        onExport={handleExportShortcut}
+        actions={
+          pipelineStep ? (
+            <button className="btn danger" onClick={handleCancelRunAll}>
+              Stop
+            </button>
+          ) : (
+            <button
+              className="btn"
+              onClick={handleExportShortcut}
+              title="Jump to the render settings"
+            >
+              <IconExport size={14} />
+              <span>Export…</span>
+            </button>
+          )
+        }
+        onExport={handleRunAll}
+        exportLabel={pipelineStep ?? "Run all"}
+        exportBusy={!!pipelineStep}
+        exportTitle={
+          pipelineStep
+            ? `Pipeline running — ${pipelineStep}`
+            : "Run every remaining stage through to the final movie"
+        }
       />
 
       <main className="app-body">
@@ -1855,6 +2048,7 @@ export default function ProjectView() {
             jobProgress={jobProgress}
             onCancelJob={(jobId) => void cancelJob(jobId)}
             onJumpToSection={setSection}
+            pipelineStep={pipelineStep}
           />
         </aside>
       </main>
@@ -2450,6 +2644,7 @@ function Inspector(props: {
   jobProgress: Record<string, number>;
   onCancelJob: (jobId: string) => void;
   onJumpToSection: (s: EditorSection) => void;
+  pipelineStep: string | null;
 }) {
   const seg = useMemo(
     () =>
@@ -2567,6 +2762,13 @@ function Inspector(props: {
 
         <div className="section">
           <div className="section-title">AI workflow</div>
+          {props.pipelineStep && (
+            <div className="banner banner--info" style={{ marginBottom: 8 }}>
+              Running the full pipeline — {props.pipelineStep.toLowerCase()}.
+              You can leave this window open; each stage starts
+              automatically.
+            </div>
+          )}
           {props.workflow.steps.map((step) => (
             <div key={step.key} className={`workflow-step ${step.state}`}>
               <span className="wf-marker" aria-hidden="true">

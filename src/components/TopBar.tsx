@@ -38,6 +38,12 @@ export type TopBarProps = {
   onSave?: () => void;
   onExport?: () => void;
   showWorker?: boolean;
+  /// Label override for the primary right-hand button. The Project
+  /// screen swaps "Export" for "Run all" (or the current pipeline
+  /// stage) since one click there drives the whole chain to an MP4.
+  exportLabel?: string;
+  exportTitle?: string;
+  exportBusy?: boolean;
 };
 
 export function TopBar(props: TopBarProps) {
@@ -55,6 +61,9 @@ export function TopBar(props: TopBarProps) {
     onSave,
     onExport,
     showWorker = true,
+    exportLabel = "Export",
+    exportTitle,
+    exportBusy = false,
   } = props;
 
   return (
@@ -124,9 +133,18 @@ export function TopBar(props: TopBarProps) {
           </Link>
         )}
         {onExport && (
-          <button className="btn primary" onClick={onExport} title="Export">
-            <IconExport size={14} />
-            <span>Export</span>
+          <button
+            className="btn primary"
+            onClick={onExport}
+            title={exportTitle ?? exportLabel}
+            disabled={exportBusy}
+          >
+            {exportBusy ? (
+              <span className="spinner" aria-hidden="true" />
+            ) : (
+              <IconExport size={14} />
+            )}
+            <span>{exportLabel}</span>
           </button>
         )}
       </div>
