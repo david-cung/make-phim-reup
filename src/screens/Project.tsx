@@ -311,6 +311,9 @@ export default function ProjectView() {
   // render is far more disruptive than the failure itself.
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Success/no-op feedback. Without it, finishing a pipeline that had
+  // nothing left to do looks identical to a button that does nothing.
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [sttOptions, setSttOptions] = useState<SttOptions>(() =>
     defaultSttOptions(),
@@ -1517,17 +1520,19 @@ export default function ProjectView() {
     setRenderSettings({ outputPath: null });
   };
 
-  // Export CTA in the topbar jumps to the AI section and scrolls to the
-  // render panel — the actual render is still initiated from RenderPanel
-  // so we keep a single source of truth for the FFmpeg command.
-  const handleExportShortcut = () => {
+  // Export CTA in the topbar. It used to only scroll to the render panel,
+  // which read as broken: the label promises a file, and pressing it
+  // while already on the render section did nothing at all. Now it
+  // guarantees the deliverable — reveal the render settings, then drive
+  // whatever stages are still missing through to the final movie.
+  const handleExport = async () => {
     setSection("render");
-    // let the section switch commit before scrolling
     requestAnimationFrame(() => {
       document
         .getElementById("panel-render")
         ?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
+    await runPipeline({ upTo: "render" });
   };
 
   // -----------------------------------------------------------------------
@@ -1553,21 +1558,22 @@ export default function ProjectView() {
 
   /// Start one stage and block until its job reaches a terminal state.
   /// A non-null result from `start` means the backend served it from
-  /// cache and no job exists to wait on.
+  /// cache and no job exists to wait on. Resolves `true` when real work
+  /// ran, `false` when the stage was already up to date.
   const runStage = async (
     stage: JobSnapshot["stage"],
     start: () => Promise<unknown>,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     throwIfAborted();
     const cached = await start();
-    if (cached != null) return;
+    if (cached != null) return false;
 
     const parseTs = (s: string | null | undefined) =>
       s ? Date.parse(s) || 0 : 0;
     const job = Object.values(useAppStore.getState().jobsById)
       .filter((j) => j.projectId === project.id && j.stage === stage)
       .sort((a, b) => parseTs(b.createdAt) - parseTs(a.createdAt))[0];
-    if (!job || isTerminalStatus(job.status)) return;
+    if (!job || isTerminalStatus(job.status)) return false;
 
     const result = await waitForJobTerminal(job.id);
     if (result.status === "cancelled") {
@@ -1587,17 +1593,23 @@ export default function ProjectView() {
     // already done?" check below depends on the refreshed manifest, so
     // settle it here before returning to the caller.
     await useAppStore.getState().refreshMedia(project.id);
+    return true;
   };
 
-  const handleRunAll = async () => {
+  const runPipeline = async (opts?: { upTo?: "render" }) => {
     if (!project.sourceMediaPath) {
       setError("Import a video first, then run the pipeline.");
       setSection("media");
       return;
     }
+    if (pipelineStep) return;
     pipelineAbortRef.current = false;
     setError(null);
+    setNotice(null);
     setBusy(true);
+    // Distinguishes "nothing was left to do" from "the click did
+    // nothing", so we can always report an outcome.
+    let ranSomething = false;
     try {
       const fresh = () => useAppStore.getState().currentMedia;
 
@@ -1612,9 +1624,11 @@ export default function ProjectView() {
         setSection("transcription");
         const modelReady = await ensureWhisperModelReady();
         if (!modelReady) return;
-        await runStage("transcribe", () =>
+        if (await runStage("transcribe", () =>
           startTranscribe(project.id, sttOptions),
-        );
+        )) {
+          ranSomething = true;
+        }
       }
 
       const tr = fresh()?.translation;
@@ -1625,7 +1639,9 @@ export default function ProjectView() {
         setSection("translation");
         const opts = await ensureTranslationModelReady();
         if (!opts) return;
-        await runStage("translate", () => startTranslate(project.id, opts));
+        if (await runStage("translate", () => startTranslate(project.id, opts))) {
+          ranSomething = true;
+        }
       }
 
       // `onJobUpdate` auto-rebuilds subtitles once translation lands,
@@ -1645,25 +1661,52 @@ export default function ProjectView() {
       setSection("voices");
       const voiceReady = await ensureTtsVoiceReady();
       if (!voiceReady) return;
-      await runStage("tts", () =>
-        startGenerateTts(project.id, { kind: "missing" }),
-      );
+      if (
+        await runStage("tts", () =>
+          startGenerateTts(project.id, { kind: "missing" }),
+        )
+      ) {
+        ranSomething = true;
+      }
 
       setPipelineStep("Syncing voice");
-      await runStage("sync", () =>
-        startApplySync(project.id, { kind: "missing" }),
-      );
+      if (
+        await runStage("sync", () =>
+          startApplySync(project.id, { kind: "missing" }),
+        )
+      ) {
+        ranSomething = true;
+      }
 
       setPipelineStep("Mixing audio");
       setSection("mix");
-      await runStage("mix", () => startApplyMix(project.id));
+      ranSomething = (await runStage("mix", () => startApplyMix(project.id)))
+        ? true
+        : ranSomething;
 
       setPipelineStep("Rendering movie");
       setSection("render");
-      await runStage("render", () => startApplyRender(project.id, {}));
+      ranSomething = (await runStage("render", () =>
+        startApplyRender(project.id, {}),
+      ))
+        ? true
+        : ranSomething;
 
       setPipelineStep(null);
       await useAppStore.getState().refreshMedia(project.id);
+
+      const out = useAppStore.getState().currentMedia?.render;
+      if (out?.absolutePath) {
+        setNotice(
+          ranSomething
+            ? `Movie ready: ${out.absolutePath}`
+            : `Already up to date — the movie is at ${out.absolutePath}`,
+        );
+      } else if (opts?.upTo === "render") {
+        setNotice(
+          "The pipeline finished but no output file was reported. Check the render panel below.",
+        );
+      }
     } catch (e) {
       if ((e as { code?: string })?.code !== PIPELINE_CANCELLED) {
         setError(formatError(e));
@@ -1714,15 +1757,15 @@ export default function ProjectView() {
           ) : (
             <button
               className="btn"
-              onClick={handleExportShortcut}
-              title="Jump to the render settings"
+              onClick={() => void handleExport()}
+              title="Finish any remaining stages and render the movie"
             >
               <IconExport size={14} />
-              <span>Export…</span>
+              <span>Export</span>
             </button>
           )
         }
-        onExport={handleRunAll}
+        onExport={() => void runPipeline()}
         exportLabel={pipelineStep ?? "Run all"}
         exportBusy={!!pipelineStep}
         exportTitle={
@@ -1761,19 +1804,6 @@ export default function ProjectView() {
         </aside>
 
         <div className="workspace">
-          {error && (
-            <div className="banner banner--error workspace-error" role="alert">
-              <span>{error}</span>
-              <button
-                className="btn ghost icon"
-                onClick={() => setError(null)}
-                title="Dismiss"
-                aria-label="Dismiss error"
-              >
-                <IconClose size={14} />
-              </button>
-            </div>
-          )}
           <div className="workspace-center">
             <div className="workspace-split">
               <Stage
@@ -1819,8 +1849,29 @@ export default function ProjectView() {
                 </div>
                 <div className="workpane-body">
                   {error && (
-                    <div className="banner banner--error" role="alert">
-                      {error}
+                    <div className="banner banner--error msg-row" role="alert">
+                      <span>{error}</span>
+                      <button
+                        className="btn ghost icon"
+                        onClick={() => setError(null)}
+                        title="Dismiss"
+                        aria-label="Dismiss error"
+                      >
+                        <IconClose size={14} />
+                      </button>
+                    </div>
+                  )}
+                  {notice && (
+                    <div className="banner banner--info msg-row" role="status">
+                      <span>{notice}</span>
+                      <button
+                        className="btn ghost icon"
+                        onClick={() => setNotice(null)}
+                        title="Dismiss"
+                        aria-label="Dismiss message"
+                      >
+                        <IconClose size={14} />
+                      </button>
                     </div>
                   )}
 
