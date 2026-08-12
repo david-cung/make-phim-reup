@@ -165,11 +165,16 @@ pub fn build_filter_graph(voices: &[&MixVoiceInput], settings: &MixSettings) -> 
 
     // Ducking (only meaningful when we actually have voice content).
     let orig_final = if s.ducking_enabled && voice_label.is_some() {
-        let makeup = duck_makeup_ratio_from_depth_db(s.ducking_depth_db);
+        let ratio = duck_ratio_from_depth_db(s.ducking_depth_db);
+        // `makeup` is a linear post-gain with an FFmpeg range of [1, 64];
+        // 1 is unity. Ducking exists to push the original *down* while
+        // the voice speaks, so we never want to add gain back — and 0 is
+        // rejected outright ("Value 0.000000 for parameter 'makeup' out
+        // of range").
         chain.push(format!(
-            "[orig_g][voice_g]sidechaincompress=threshold={thresh:.4}:ratio={ratio:.4}:attack={attack:.2}:release={release:.2}:makeup=0[orig_ducked]",
+            "[orig_g][voice_g]sidechaincompress=threshold={thresh:.4}:ratio={ratio:.4}:attack={attack:.2}:release={release:.2}:makeup=1[orig_ducked]",
             thresh = db_to_linear(s.ducking_threshold_db),
-            ratio = makeup,
+            ratio = ratio,
             attack = s.ducking_attack_ms,
             release = s.ducking_release_ms,
         ));
@@ -209,7 +214,11 @@ fn db_to_linear(db: f32) -> f32 {
 /// should sit when the voice is present — larger depth ⇒ larger ratio.
 /// We keep the mapping simple and monotonic: depth 0 dB ⇒ ratio 1
 /// (no compression), depth 30 dB ⇒ ratio 20 (heavy pump).
-pub fn duck_makeup_ratio_from_depth_db(depth_db: f32) -> f32 {
+///
+/// Named for `ratio` deliberately: this feeds `sidechaincompress`'s
+/// `ratio`, not its `makeup`, and conflating the two is what produced an
+/// invalid `makeup=0` in the graph.
+pub fn duck_ratio_from_depth_db(depth_db: f32) -> f32 {
     let d = depth_db.max(0.0);
     // Empirical map — clamped to FFmpeg's ratio range [1, 20].
     (1.0 + d * (19.0 / 30.0)).clamp(1.0, 20.0)

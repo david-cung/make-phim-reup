@@ -16,7 +16,7 @@ use crate::sync::{
     SYNC_CACHE_SCHEMA_VERSION,
 };
 
-use super::ffmpeg_cmd::{build_filter_graph, build_mix_command, duck_makeup_ratio_from_depth_db};
+use super::ffmpeg_cmd::{build_filter_graph, build_mix_command, duck_ratio_from_depth_db};
 use super::models::{
     build_mix_cache_key, MixSettings, MixStatus, MixVoiceInput, MIX_CACHE_SCHEMA_VERSION,
 };
@@ -290,14 +290,91 @@ fn build_mix_command_filters_empty_voice_inputs() {
 }
 
 #[test]
-fn duck_makeup_ratio_is_monotonic() {
-    let r0 = duck_makeup_ratio_from_depth_db(0.0);
-    let r10 = duck_makeup_ratio_from_depth_db(10.0);
-    let r30 = duck_makeup_ratio_from_depth_db(30.0);
+fn duck_ratio_is_monotonic() {
+    let r0 = duck_ratio_from_depth_db(0.0);
+    let r10 = duck_ratio_from_depth_db(10.0);
+    let r30 = duck_ratio_from_depth_db(30.0);
     assert!(r0 < r10);
     assert!(r10 < r30);
     // Both endpoints must sit in FFmpeg's ratio range.
     assert!(r0 >= 1.0 && r30 <= 20.0);
+}
+
+/// FFmpeg rejects the whole graph if any `sidechaincompress` parameter
+/// falls outside its documented range — we shipped `makeup=0` and mixing
+/// died with "Value 0.000000 for parameter 'makeup' out of range [1-64]".
+/// Assert every knob we emit stays inside the ranges FFmpeg accepts, at
+/// the extremes of what the UI can produce.
+#[test]
+fn sidechaincompress_params_stay_in_ffmpeg_ranges() {
+    let voices = [voice(1, 0.0, "k1", false)];
+    let refs: Vec<&MixVoiceInput> = voices.iter().collect();
+
+    for (depth, thresh, attack, release) in [
+        (0.0, 0.0, 1.0, 10.0),
+        (30.0, -60.0, 500.0, 5000.0),
+        (12.0, -24.0, 20.0, 300.0),
+    ] {
+        let settings = MixSettings {
+            ducking_enabled: true,
+            ducking_depth_db: depth,
+            ducking_threshold_db: thresh,
+            ducking_attack_ms: attack,
+            ducking_release_ms: release,
+            ..MixSettings::default()
+        }
+        .normalised();
+        let g = build_filter_graph(&refs, &settings);
+
+        let node = g
+            .split(';')
+            .find(|part| part.contains("sidechaincompress"))
+            .expect("ducking graph must contain the compressor");
+
+        // The first segment is `[orig_g][voice_g]sidechaincompress=threshold=…`,
+        // so match `name=` anywhere and read the number that follows.
+        let param = |name: &str| -> f32 {
+            let key = format!("{name}=");
+            let at = node
+                .find(&key)
+                .unwrap_or_else(|| panic!("missing {name} in {node}"))
+                + key.len();
+            let rest = &node[at..];
+            let end = rest
+                .find(|c: char| c != '.' && c != '-' && !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest[..end]
+                .parse()
+                .unwrap_or_else(|e| panic!("unparseable {name} in {node}: {e}"))
+        };
+
+        // Ranges per FFmpeg's sidechaincompress documentation.
+        let makeup = param("makeup");
+        assert!(
+            (1.0..=64.0).contains(&makeup),
+            "makeup {makeup} out of [1, 64] for depth={depth}"
+        );
+        let ratio = param("ratio");
+        assert!(
+            (1.0..=20.0).contains(&ratio),
+            "ratio {ratio} out of [1, 20] for depth={depth}"
+        );
+        let threshold = param("threshold");
+        assert!(
+            (0.000976563..=1.0).contains(&threshold),
+            "threshold {threshold} out of range for thresh_db={thresh}"
+        );
+        let attack_v = param("attack");
+        assert!(
+            (0.01..=2000.0).contains(&attack_v),
+            "attack {attack_v} out of [0.01, 2000]"
+        );
+        let release_v = param("release");
+        assert!(
+            (0.01..=9000.0).contains(&release_v),
+            "release {release_v} out of [0.01, 9000]"
+        );
+    }
 }
 
 // -----------------------------------------------------------------
