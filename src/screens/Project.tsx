@@ -788,11 +788,16 @@ export default function ProjectView() {
             }.`,
         );
       }
+      // `onJobUpdate` refreshes media on completion, but fire-and-forget
+      // — and `waitForJobTerminal` resolves off that same event. Reading
+      // `currentMedia` now would race the un-awaited IPC round-trip and
+      // see a stale snapshot, so refresh again and await it.
+      await useAppStore.getState().refreshMedia(project.id);
     }
     const after = useAppStore.getState().currentMedia;
     if (!after?.audioAbsolutePath) {
       throw new Error(
-        "Audio extraction did not produce an audio file. Check that FFmpeg is installed.",
+        "Audio extraction finished but no audio file was produced. Check that FFmpeg is installed and the video has an audio track.",
       );
     }
     return true;
@@ -1535,6 +1540,12 @@ export default function ProjectView() {
           `${stage} failed${result.errorCode ? ` — ${result.errorCode}` : ""}.`,
       );
     }
+    // Same race as in `ensureAudioExtracted`: the media refresh that
+    // `onJobUpdate` triggers on completion isn't awaited, and this
+    // promise resolves off that same event. Every "is this stage
+    // already done?" check below depends on the refreshed manifest, so
+    // settle it here before returning to the caller.
+    await useAppStore.getState().refreshMedia(project.id);
   };
 
   const handleRunAll = async () => {
@@ -1578,11 +1589,13 @@ export default function ProjectView() {
 
       // `onJobUpdate` auto-rebuilds subtitles once translation lands,
       // but that fires off a promise we can't await from here — and it
-      // never runs at all when translation was served from cache. Build
-      // explicitly so the dubbing stages below always have a document.
+      // never runs at all when translation was served from cache. Load
+      // the current doc first so we don't kick off a second, concurrent
+      // rebuild, then build only if there genuinely isn't one.
+      setPipelineStep("Building subtitles");
+      setSection("subtitles");
+      await loadSubtitles(project.id);
       if (!useAppStore.getState().currentSubtitleDoc) {
-        setPipelineStep("Building subtitles");
-        setSection("subtitles");
         await rebuildSubtitles(project.id);
       }
       throwIfAborted();
