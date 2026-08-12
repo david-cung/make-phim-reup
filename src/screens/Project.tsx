@@ -5082,7 +5082,9 @@ function RenderPanel(props: {
   const hasMix = mixSummary?.status === "ready";
   const hasSubtitles = (subtitleSummary?.segmentCount ?? 0) > 0;
   const canApply = ffmpegOk && hasMix && hasSubtitles && !activeJob;
-  const canBurn = hasSubtitles;
+  // Burning needs libass, which this FFmpeg may not have been built with.
+  const burnSupported = env?.subtitleBurnAvailable ?? false;
+  const canBurn = hasSubtitles && burnSupported;
 
   const videoCodecs = env?.videoCodecs ?? ["copy", "libx264", "libx265"];
   const audioCodecs = env?.audioCodecs ?? ["aac", "libopus", "ac3", "mp3"];
@@ -5116,9 +5118,12 @@ function RenderPanel(props: {
             }
           >
             <option value="none">None (no subtitles)</option>
-            <option value="external">External (movie_vi.srt sidecar)</option>
+            <option value="external">
+              External (.srt file beside the movie)
+            </option>
             <option value="burned" disabled={!canBurn}>
-              Burned into video
+              Burned into video (always visible)
+              {burnSupported ? "" : " — needs FFmpeg with libass"}
             </option>
           </select>
         </label>
@@ -5225,6 +5230,25 @@ function RenderPanel(props: {
       {settings.subtitleMode === "burned" && (
         <div className="banner banner--muted small">
           Burning subtitles forces a video re-encode (libx264).
+        </div>
+      )}
+
+      {ffmpegOk && !burnSupported && (
+        <div className="banner banner--warn small">
+          This FFmpeg was built without libass, so it cannot burn subtitles
+          into the picture. External mode writes a <code>.srt</code> beside
+          the movie, which only shows up if the player loads it. To burn
+          them in, install a full FFmpeg build (macOS:{" "}
+          <code className="mono">brew install ffmpeg</code>) and point
+          Settings → FFmpeg path at it.
+        </div>
+      )}
+
+      {settings.subtitleMode === "external" && (
+        <div className="banner banner--muted small">
+          The .srt is written next to the movie. Most players need it turned
+          on manually, and uploads usually drop it — burn the subtitles in if
+          the file has to carry them.
         </div>
       )}
 

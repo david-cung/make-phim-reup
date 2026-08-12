@@ -17,10 +17,10 @@ use crate::subtitles::{DirtyFlags, SubtitleDoc, SubtitleSegment};
 use super::cache::{default_subtitle_output_path, subtitle_sidecar_path};
 use super::ffmpeg_cmd::{build_render_command, build_subtitles_filter};
 use super::models::{
-    build_render_cache_key, AudioCodec, OutputFormat, RenderSettings, RenderStatus, SubtitleMode,
-    VideoCodec, RENDER_CACHE_SCHEMA_VERSION,
+    build_render_cache_key, AudioCodec, OutputFormat, RenderManifest, RenderSettings, RenderStatus,
+    SubtitleMode, VideoCodec, RENDER_CACHE_SCHEMA_VERSION,
 };
-use super::service::build_summary;
+use super::service::{build_summary, default_settings_for};
 
 // -----------------------------------------------------------------
 // Helpers
@@ -84,7 +84,7 @@ fn mix_entry(cache_key: &str) -> MixEntry {
 
 #[test]
 fn cache_key_versioned() {
-    assert_eq!(RENDER_CACHE_SCHEMA_VERSION, 1);
+    assert_eq!(RENDER_CACHE_SCHEMA_VERSION, 2);
     let key = build_render_cache_key(&fingerprint(), "sha256:m1", &RenderSettings::default());
     assert!(key.starts_with("sha256:"));
     assert!(key.len() > 20);
@@ -345,6 +345,66 @@ fn mkv_output_omits_faststart_flag() {
 // -----------------------------------------------------------------
 
 // -----------------------------------------------------------------
+// Defaults and migration
+// -----------------------------------------------------------------
+
+/// A sidecar the viewer never loads reads as "no subtitles", which is what
+/// the old default produced. Burn them in unless asked otherwise.
+#[test]
+fn default_subtitle_mode_is_visible_without_player_help() {
+    assert_eq!(SubtitleMode::default(), SubtitleMode::Burned);
+    assert_eq!(
+        RenderSettings::default().subtitle_mode,
+        SubtitleMode::Burned,
+    );
+}
+
+/// Advertising a mode this FFmpeg can't perform just moves the failure to
+/// render time, so the default has to bend to the build.
+#[test]
+fn advertised_default_falls_back_when_burning_is_unavailable() {
+    assert_eq!(
+        default_settings_for(true).subtitle_mode,
+        SubtitleMode::Burned,
+    );
+    assert_eq!(
+        default_settings_for(false).subtitle_mode,
+        SubtitleMode::External,
+    );
+}
+
+#[test]
+fn migration_moves_v1_external_projects_to_burned() {
+    let mut old = RenderManifest::empty(RenderSettings::default());
+    old.version = 1;
+    old.settings.subtitle_mode = SubtitleMode::External;
+
+    let m = old.migrated();
+    assert_eq!(m.version, RENDER_CACHE_SCHEMA_VERSION);
+    assert_eq!(m.settings.subtitle_mode, SubtitleMode::Burned);
+}
+
+/// `None` is a choice the old default could never have produced, so it's
+/// deliberate and stays put.
+#[test]
+fn migration_respects_an_explicit_no_subtitles_choice() {
+    let mut old = RenderManifest::empty(RenderSettings::default());
+    old.version = 1;
+    old.settings.subtitle_mode = SubtitleMode::None;
+
+    assert_eq!(old.migrated().settings.subtitle_mode, SubtitleMode::None);
+}
+
+/// Migration runs on every load, so picking `External` on a current
+/// manifest must survive the next one.
+#[test]
+fn migration_leaves_current_manifests_alone() {
+    let mut m = RenderManifest::empty(RenderSettings::default());
+    m.settings.subtitle_mode = SubtitleMode::External;
+    assert_eq!(m.clone().migrated(), m);
+}
+
+// -----------------------------------------------------------------
 // Sidecar placement
 // -----------------------------------------------------------------
 
@@ -357,7 +417,11 @@ fn external_sidecar_lands_next_to_a_custom_output_path() {
     let out = Path::new("/Users/dc/Downloads/movie_vi.mp4");
     let subs = subtitle_sidecar_path(project, out, SubtitleMode::External);
     assert_eq!(subs, PathBuf::from("/Users/dc/Downloads/movie_vi.srt"));
-    assert_eq!(subs.parent(), out.parent(), "player needs them side by side");
+    assert_eq!(
+        subs.parent(),
+        out.parent(),
+        "player needs them side by side"
+    );
 }
 
 #[test]

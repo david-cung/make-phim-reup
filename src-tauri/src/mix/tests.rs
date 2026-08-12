@@ -18,7 +18,8 @@ use crate::sync::{
 
 use super::ffmpeg_cmd::{build_filter_graph, build_mix_command, duck_ratio_from_depth_db};
 use super::models::{
-    build_mix_cache_key, MixSettings, MixStatus, MixVoiceInput, MIX_CACHE_SCHEMA_VERSION,
+    build_mix_cache_key, MixManifest, MixSettings, MixStatus, MixVoiceInput,
+    MIX_CACHE_SCHEMA_VERSION,
 };
 use super::service::{build_summary, collect_voice_inputs};
 
@@ -189,7 +190,10 @@ fn cache_key_changes_with_voice_cache_key() {
 fn cache_key_versioned() {
     // Guard against a silent schema bump — anyone changing the version
     // constant must accept the fallout of invalidating everyone's mix.
-    assert_eq!(MIX_CACHE_SCHEMA_VERSION, 1);
+    // v2 rebalanced the defaults and added the output limiter, both of
+    // which change the WAV without changing any user-visible setting, so
+    // the bump is what forces existing mixes to regenerate.
+    assert_eq!(MIX_CACHE_SCHEMA_VERSION, 2);
     let fp = fingerprint();
     let key = build_mix_cache_key(&fp, &[], &MixSettings::default());
     assert!(key.contains("sha256:"));
@@ -249,6 +253,115 @@ fn filter_graph_with_no_voices_produces_original_only() {
     assert!(g.ends_with("[mix]"));
     assert!(!g.contains("adelay"));
     assert!(!g.contains("sidechaincompress"));
+}
+
+// -----------------------------------------------------------------
+// Output ceiling
+// -----------------------------------------------------------------
+
+/// Summing the ducked original with the voice-over overshot full scale on
+/// loud passages and the WAV clipped — measurably, thousands of samples
+/// pinned at peak. Every path has to end in the limiter.
+#[test]
+fn filter_graph_limits_the_summed_output() {
+    let voices = [voice(1, 0.0, "k1", false), voice(2, 4.0, "k2", false)];
+    let refs: Vec<&MixVoiceInput> = voices.iter().collect();
+    for graph in [
+        build_filter_graph(&refs, &MixSettings::default()),
+        build_filter_graph(&[], &MixSettings::default()),
+    ] {
+        assert!(graph.contains("alimiter"), "graph was: {graph}");
+        assert!(
+            graph.ends_with("[mix]"),
+            "limiter must be the last node feeding -map [mix]",
+        );
+        // Auto-level would drag quiet stretches up to the ceiling and
+        // cancel out the ducking.
+        assert!(graph.contains("level=disabled"), "graph was: {graph}");
+    }
+}
+
+#[test]
+fn limiter_leaves_headroom_below_full_scale() {
+    let g = build_filter_graph(&[], &MixSettings::default());
+    let limit: f32 = g
+        .split("limit=")
+        .nth(1)
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no limit= in graph: {g}"));
+    assert!(
+        limit > 0.0 && limit < 1.0,
+        "limit={limit} must sit under full scale",
+    );
+}
+
+// -----------------------------------------------------------------
+// Defaults and migration
+// -----------------------------------------------------------------
+
+/// The voice-over is the reason the file exists; the source track is
+/// background. Defaults that put them near parity make the foreign
+/// dialogue win, since it's the one matching the picture.
+#[test]
+fn defaults_keep_the_original_well_under_the_voice() {
+    let s = MixSettings::default();
+    assert!(
+        s.original_volume <= 0.3,
+        "original at {} is loud enough to fight the voice",
+        s.original_volume,
+    );
+    assert!(s.voice_volume >= 1.0);
+    assert!(s.ducking_enabled);
+    assert!(
+        s.ducking_depth_db >= 18.0,
+        "ducking of {} dB barely moves the original",
+        s.ducking_depth_db,
+    );
+}
+
+#[test]
+fn migration_adopts_the_new_balance_for_untouched_v1_projects() {
+    let mut old = MixManifest::empty(MixSettings::default());
+    old.version = 1;
+    old.settings.original_volume = 0.70;
+    old.settings.ducking_depth_db = 12.0;
+
+    let m = old.migrated();
+    assert_eq!(m.version, MIX_CACHE_SCHEMA_VERSION);
+    assert_eq!(
+        m.settings.original_volume,
+        MixSettings::default().original_volume
+    );
+    assert_eq!(
+        m.settings.ducking_depth_db,
+        MixSettings::default().ducking_depth_db,
+    );
+}
+
+/// A user who deliberately moved a slider shouldn't have it yanked back by
+/// an upgrade.
+#[test]
+fn migration_preserves_deliberately_chosen_values() {
+    let mut old = MixManifest::empty(MixSettings::default());
+    old.version = 1;
+    old.settings.original_volume = 1.4;
+    old.settings.ducking_depth_db = 3.0;
+
+    let m = old.migrated();
+    assert_eq!(m.settings.original_volume, 1.4);
+    assert_eq!(m.settings.ducking_depth_db, 3.0);
+}
+
+/// Migration runs on every load, so it has to be a no-op once applied —
+/// otherwise re-picking a v1 value would silently flip it again.
+#[test]
+fn migration_leaves_current_manifests_alone() {
+    let mut m = MixManifest::empty(MixSettings::default());
+    m.settings.original_volume = 0.70;
+    m.settings.ducking_depth_db = 12.0;
+    let out = m.clone().migrated();
+    assert_eq!(out, m);
 }
 
 #[test]

@@ -15,7 +15,8 @@
 //!   [voice]volume=voice_vol                            -> [voice_g]
 //!   [orig]volume=orig_vol                              -> [orig_g]
 //!   [orig_g][voice_g]sidechaincompress=threshold=…     -> [orig_ducked]
-//!   [orig_ducked][voice_g]amix=inputs=2:normalize=0    -> [mix]
+//!   [orig_ducked][voice_g]amix=inputs=2:normalize=0    -> [mix_sum]
+//!   [mix_sum]alimiter=limit=…:level=disabled           -> [mix]
 //! ```
 //!
 //! With ducking off, the `sidechaincompress` node is skipped and the
@@ -24,6 +25,11 @@
 use std::path::Path;
 
 use super::models::{MixSettings, MixVoiceInput};
+
+/// Peak ceiling for the output, linear. ≈ −1 dBFS, which leaves the AAC
+/// encoder in the render step a little room to overshoot without
+/// clipping.
+const LIMITER_CEILING: f32 = 0.891;
 
 /// A single FFmpeg process description ready to hand to
 /// [`tokio::process::Command`]. Held as `Vec<String>` because we log
@@ -184,14 +190,26 @@ pub fn build_filter_graph(voices: &[&MixVoiceInput], settings: &MixSettings) -> 
     };
 
     // Final mix. If we have no voice content, just alias the original
-    // through so `-map [mix]` still resolves.
+    // through so the limiter below still has something to read.
     match voice_label {
         Some(_) => chain.push(format!(
-            "[{orig}][voice_g]amix=inputs=2:normalize=0:duration=longest[mix]",
+            "[{orig}][voice_g]amix=inputs=2:normalize=0:duration=longest[mix_sum]",
             orig = orig_final
         )),
-        None => chain.push(format!("[{orig}]anull[mix]", orig = orig_final)),
+        None => chain.push(format!("[{orig}]anull[mix_sum]", orig = orig_final)),
     }
+
+    // `normalize=0` makes `amix` a straight sum, so a voice line landing
+    // on a loud passage pushes the result past full scale and the samples
+    // clip. Catch those peaks instead of letting them square off, keeping
+    // ~1 dB spare for the lossy encode the render step adds on top.
+    //
+    // `level=disabled` matters: the limiter's auto-level would pull quiet
+    // stretches up to the ceiling, undoing the ducking we just applied.
+    chain.push(format!(
+        "[mix_sum]alimiter=limit={ceiling:.3}:level=disabled[mix]",
+        ceiling = LIMITER_CEILING,
+    ));
 
     chain.join(";")
 }

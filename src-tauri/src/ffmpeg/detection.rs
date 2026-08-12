@@ -23,6 +23,12 @@ pub struct FfmpegAvailability {
     pub version: Option<String>,
     /// Error message when `available` is false. Never a stack trace.
     pub error: Option<String>,
+    /// Whether this build can burn subtitles into video, i.e. whether the
+    /// `subtitles` filter exists. It needs libass, which plenty of FFmpeg
+    /// builds leave out — including Homebrew's slimmer variants — so its
+    /// presence cannot be assumed from `available` alone.
+    #[serde(default)]
+    pub has_subtitles_filter: bool,
 }
 
 /// Ready-to-use handle for spawning FFmpeg / FFprobe subprocesses.
@@ -35,6 +41,7 @@ pub struct FfmpegService {
     ffmpeg: PathBuf,
     ffprobe: PathBuf,
     version: String,
+    has_subtitles_filter: bool,
 }
 
 impl FfmpegService {
@@ -50,6 +57,11 @@ impl FfmpegService {
         &self.version
     }
 
+    /// True when this build can burn subtitles into the picture.
+    pub fn has_subtitles_filter(&self) -> bool {
+        self.has_subtitles_filter
+    }
+
     pub fn availability(&self) -> FfmpegAvailability {
         FfmpegAvailability {
             available: true,
@@ -57,6 +69,7 @@ impl FfmpegService {
             ffprobe_path: Some(self.ffprobe.display().to_string()),
             version: Some(self.version.clone()),
             error: None,
+            has_subtitles_filter: self.has_subtitles_filter,
         }
     }
 
@@ -66,16 +79,19 @@ impl FfmpegService {
         verify_executable(&ffmpeg, "ffmpeg").await?;
         verify_executable(&ffprobe, "ffprobe").await?;
         let version = probe_version(&ffmpeg).await?;
+        let has_subtitles_filter = probe_subtitles_filter(&ffmpeg).await;
         tracing::info!(
             ffmpeg = %ffmpeg.display(),
             ffprobe = %ffprobe.display(),
             version,
+            has_subtitles_filter,
             "ffmpeg service ready"
         );
         Ok(Self {
             ffmpeg,
             ffprobe,
             version,
+            has_subtitles_filter,
         })
     }
 
@@ -94,6 +110,7 @@ impl FfmpegService {
                     ffprobe_path: None,
                     version: None,
                     error: Some(err.to_string()),
+                    has_subtitles_filter: false,
                 }
             }
         }
@@ -128,6 +145,7 @@ impl FfmpegHandle {
                 ffprobe_path: None,
                 version: None,
                 error: Some("FFmpeg has not been probed yet".into()),
+                has_subtitles_filter: false,
             }),
         })
     }
@@ -155,6 +173,7 @@ impl FfmpegHandle {
                     ffprobe_path: None,
                     version: None,
                     error: Some(err.to_string()),
+                    has_subtitles_filter: false,
                 };
                 *self.inner.write() = None;
                 *self.last_availability.write() = av.clone();
@@ -284,9 +303,83 @@ async fn probe_version(ffmpeg: &Path) -> Result<String, FfmpegError> {
     Ok(ver)
 }
 
+/// Ask FFmpeg whether it has the `subtitles` filter.
+///
+/// Burning subtitles needs libass, and a build without it rejects the
+/// filter with a bare parse error ("No option name near …") that tells the
+/// user nothing. Checking up front lets the UI hide the option and the
+/// render explain itself. A failed probe reports "no" — the worst case is
+/// we steer someone towards a sidecar they didn't need.
+async fn probe_subtitles_filter(ffmpeg: &Path) -> bool {
+    let out = match Command::new(ffmpeg)
+        .arg("-hide_banner")
+        .arg("-filters")
+        .kill_on_drop(true)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(err) => {
+            tracing::warn!(%err, "could not list ffmpeg filters");
+            return false;
+        }
+    };
+    filter_list_has_subtitles(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Scan `ffmpeg -filters` output for the `subtitles` filter.
+///
+/// Each line looks like `... subtitles         V->V       Render text ...`,
+/// where the leading field is a flag blob. Match on the name column rather
+/// than a substring of the whole line, so the word "subtitles" appearing in
+/// some other filter's description can't fool us.
+fn filter_list_has_subtitles(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let mut cols = line.split_whitespace();
+        // Skip the flags column, then the name must match exactly.
+        matches!((cols.next(), cols.next()), (Some(_), Some("subtitles")))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_the_subtitles_filter_in_a_real_filter_listing() {
+        // Trimmed from `ffmpeg -filters` on a libass-enabled build.
+        let out = "\
+  ... setrange          V->V       Force color range for the output video frame.\n\
+  ... subtitles         V->V       Render text subtitles onto input video using the libass library.\n\
+  ... super2xsai        V->V       Scale the input by 2x using the Super2xSaI pixel art algorithm.\n";
+        assert!(filter_list_has_subtitles(out));
+    }
+
+    #[test]
+    fn reports_missing_when_the_build_lacks_libass() {
+        // Homebrew's plain `ffmpeg` bottle ships without libass, so the
+        // filter is simply absent from the listing.
+        let out = "\
+  ... setrange          V->V       Force color range for the output video frame.\n\
+  ... super2xsai        V->V       Scale the input by 2x using the Super2xSaI pixel art algorithm.\n";
+        assert!(!filter_list_has_subtitles(out));
+    }
+
+    /// Other filters mention subtitles in their description, and one of them
+    /// is even a prefix match — neither means we can burn.
+    #[test]
+    fn does_not_confuse_a_description_or_a_similar_name() {
+        let out = "\
+  ... showspectrum      A->V       Convert input audio to a spectrum video output.\n\
+  ... subtitles_dummy   V->V       Not the subtitles filter.\n\
+  ... overlay           VV->V      Overlay a video source on top of the input, e.g. subtitles.\n";
+        assert!(!filter_list_has_subtitles(out));
+    }
+
+    #[test]
+    fn handles_empty_output() {
+        assert!(!filter_list_has_subtitles(""));
+    }
 
     #[test]
     fn sibling_swaps_basename() {

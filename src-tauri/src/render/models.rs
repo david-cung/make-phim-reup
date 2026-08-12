@@ -12,24 +12,30 @@ use sha2::{Digest, Sha256};
 use crate::jobs::JobSnapshot;
 use crate::media::SourceFingerprint;
 
-pub const RENDER_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const RENDER_CACHE_SCHEMA_VERSION: u32 = 2;
 
 // -------------------------------------------------------------- settings
 
 /// How the Vietnamese subtitle track should show up in the final file.
 ///
-/// * `External` writes `movie_vi.srt` next to the muxed movie. Video is
-///   copied (`-c:v copy`) — no re-encode.
+/// * `External` writes an SRT beside the muxed movie, sharing its stem.
+///   Video is copied (`-c:v copy`) — no re-encode. Whether the viewer
+///   ever sees it is up to their player.
 /// * `Burned` renders the subtitle text into the pixels using FFmpeg's
 ///   `subtitles=` filter. This forces a video re-encode.
 /// * `None` skips subtitles entirely — the file is just video + the
 ///   mixed Vietnamese audio. Video is copied.
+///
+/// `Burned` is the default: the output of this app is usually a finished
+/// film headed somewhere that won't carry a sidecar with it, and a
+/// subtitle nobody sees is the same as no subtitle. The re-encode costs
+/// time, which is the trade the other two modes buy back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubtitleMode {
     None,
-    #[default]
     External,
+    #[default]
     Burned,
 }
 
@@ -216,6 +222,24 @@ impl RenderManifest {
             updated_at: now,
         }
     }
+
+    /// Bring a manifest written by an older build up to the current
+    /// schema. Applied on every load, and version-gated so each step runs
+    /// at most once per project.
+    ///
+    /// v1 defaulted to `External` and wrote the SRT into the project
+    /// folder rather than beside the movie, so a render to a custom path
+    /// produced a film with no reachable subtitles. The write location is
+    /// fixed, but a project carrying the old default would still ship a
+    /// sidecar the viewer has to find and load by hand. Move those to
+    /// `Burned`; `None` and any other explicit choice are left alone.
+    pub fn migrated(mut self) -> Self {
+        if self.version < 2 && matches!(self.settings.subtitle_mode, SubtitleMode::External) {
+            self.settings.subtitle_mode = SubtitleMode::default();
+        }
+        self.version = RENDER_CACHE_SCHEMA_VERSION;
+        self
+    }
 }
 
 /// One render entry in the manifest.
@@ -289,6 +313,10 @@ pub struct RenderEnv {
     pub video_codecs: Vec<String>,
     pub audio_codecs: Vec<String>,
     pub output_formats: Vec<String>,
+    /// Whether [`SubtitleMode::Burned`] is usable at all — it needs an
+    /// FFmpeg built with libass. False means the UI must not offer it.
+    #[serde(default)]
+    pub subtitle_burn_available: bool,
 }
 
 // -------------------------------------------------------------- request

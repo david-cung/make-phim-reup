@@ -31,7 +31,7 @@ impl RenderCacheFile {
             Ok(text) => {
                 let doc: RenderManifest = serde_json::from_str(&text)
                     .map_err(|e| io::Error::other(format!("invalid render.json: {e}")))?;
-                Ok(Some(doc))
+                Ok(Some(doc.migrated()))
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),

@@ -97,6 +97,23 @@ function debouncedInvoke(key: string, fn: () => void, ms = REFRESH_DEBOUNCE_MS):
   }, ms);
 }
 
+/** Keep `subtitleMode` to something this FFmpeg can actually do.
+ *
+ *  Burning needs libass, which many builds ship without, and the default
+ *  is to burn — so a project can arrive here (from its manifest, or from
+ *  the defaults) asking for something that would only fail at render time.
+ *  Fall back to the sidecar instead, which at least lands beside the movie.
+ *  Written as a guard rather than a one-time default so it corrects itself
+ *  no matter which of the two loads wins the race. */
+function withSupportedSubtitleMode(
+  settings: RenderSettings,
+  env: RenderEnv | null,
+): RenderSettings {
+  if (!env || env.subtitleBurnAvailable) return settings;
+  if (settings.subtitleMode !== "burned") return settings;
+  return { ...settings, subtitleMode: "external" };
+}
+
 // Phase 11 — per-stage auto-unload timers. `scheduleStageUnload`
 // fires the `unload_stage_models` command after `autoUnloadAfterSecs`
 // seconds of no new activity on that stage; `cancelStageUnload`
@@ -1289,7 +1306,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshRenderEnv: async () => {
     try {
       const env = await api.getRenderEnv();
-      set({ renderEnv: env });
+      set((s) => ({
+        renderEnv: env,
+        renderSettings: withSupportedSubtitleMode(s.renderSettings, env),
+      }));
       return env;
     } catch (err) {
       console.warn("render env refresh failed", err);
@@ -1306,7 +1326,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // so a project reopen doesn't wipe the user's settings back to
       // the defaults.
       if (manifest?.settings) {
-        set({ renderSettings: manifest.settings });
+        set((s) => ({
+          renderSettings: withSupportedSubtitleMode(manifest.settings, s.renderEnv),
+        }));
       }
       return manifest;
     } finally {

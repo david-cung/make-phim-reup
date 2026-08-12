@@ -12,12 +12,23 @@ use sha2::{Digest, Sha256};
 use crate::jobs::JobSnapshot;
 use crate::media::SourceFingerprint;
 
-pub const MIX_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const MIX_CACHE_SCHEMA_VERSION: u32 = 2;
+
+/// v1's defaults for the two knobs v2 changed. Kept only so
+/// [`MixManifest::migrated`] can tell an untouched knob from one the user
+/// deliberately set to the same value.
+const V1_ORIGINAL_VOLUME: f32 = 0.70;
+const V1_DUCKING_DEPTH_DB: f32 = 12.0;
 
 // -------------------------------------------------------------- settings
 
-/// Per-project audio mix knobs. Defaults come straight from the spec —
-/// original 70%, voice 100%, ducking on.
+/// Per-project audio mix knobs.
+///
+/// The defaults treat the Vietnamese voice as the point of the film and
+/// the original as background: the source track sits at 25% and drops a
+/// further 20 dB while the voice speaks. Mixing it much louder than that
+/// leaves two people talking over each other, and the foreign dialogue
+/// wins because it's the one lip-synced to the picture.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MixSettings {
@@ -56,7 +67,7 @@ pub struct MixSettings {
 }
 
 fn default_original_volume() -> f32 {
-    0.70
+    0.25
 }
 fn default_voice_volume() -> f32 {
     1.00
@@ -65,7 +76,7 @@ fn default_ducking_enabled() -> bool {
     true
 }
 fn default_ducking_depth_db() -> f32 {
-    12.0
+    20.0
 }
 fn default_ducking_threshold_db() -> f32 {
     -24.0
@@ -165,6 +176,36 @@ impl MixManifest {
             updated_at: now,
         }
     }
+
+    /// Bring a manifest written by an older build up to the current
+    /// schema. Applied on every load, and version-gated so each step
+    /// runs at most once per project.
+    ///
+    /// v1 held the original at 70% and ducked it by 12 dB, which left the
+    /// source dialogue competing with the voice-over instead of sitting
+    /// behind it. The cached WAV regenerates on its own because the cache
+    /// key carries the schema version, but the stored settings would
+    /// otherwise pin the project to the old balance forever. Adopt the new
+    /// value only where the knob still holds the v1 default, so a
+    /// deliberate choice survives.
+    pub fn migrated(mut self) -> Self {
+        if self.version < 2 {
+            if approx_eq(self.settings.original_volume, V1_ORIGINAL_VOLUME) {
+                self.settings.original_volume = default_original_volume();
+            }
+            if approx_eq(self.settings.ducking_depth_db, V1_DUCKING_DEPTH_DB) {
+                self.settings.ducking_depth_db = default_ducking_depth_db();
+            }
+        }
+        self.version = MIX_CACHE_SCHEMA_VERSION;
+        self
+    }
+}
+
+/// Compare two knob values for "the user never moved this". Slider values
+/// make a round-trip through JSON, so an exact `==` is the wrong tool.
+fn approx_eq(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1e-4
 }
 
 /// One entry in the mix manifest (there's only ever zero or one at a

@@ -877,10 +877,10 @@ export function defaultMixSettings(
   overrides: Partial<MixSettings> = {},
 ): MixSettings {
   return {
-    originalVolume: 0.7,
+    originalVolume: 0.25,
     voiceVolume: 1.0,
     duckingEnabled: true,
-    duckingDepthDb: 12.0,
+    duckingDepthDb: 20.0,
     duckingThresholdDb: -24.0,
     duckingAttackMs: 20.0,
     duckingReleaseMs: 300.0,
@@ -988,7 +988,7 @@ export function defaultRenderSettings(
     outputFormat: "mp4",
     videoCodec: { kind: "copy" },
     audioCodec: { codec: "aac", bitrate: "192k" },
-    subtitleMode: "external",
+    subtitleMode: "burned",
     outputPath: null,
     ...overrides,
   };
@@ -1001,6 +1001,9 @@ export interface RenderEnv {
   videoCodecs: string[];
   audioCodecs: string[];
   outputFormats: string[];
+  /** Whether this FFmpeg can burn subtitles — it needs libass, which many
+   *  builds omit. False means `subtitleMode: "burned"` cannot be used. */
+  subtitleBurnAvailable: boolean;
 }
 
 export interface RenderEntry {

@@ -23,6 +23,14 @@ pub enum RenderError {
     #[error("ffmpeg is not available; install it or set a custom path in Settings")]
     FfmpegMissing,
 
+    #[error(
+        "this FFmpeg build cannot burn subtitles — it has no `subtitles` filter, \
+         which requires libass. Install a full FFmpeg build (on macOS: \
+         `brew install ffmpeg`) or point Settings at one, or switch subtitle \
+         mode to External to get a .srt file beside the movie instead."
+    )]
+    SubtitleBurnUnsupported,
+
     #[error("render cancelled")]
     Cancelled,
 
@@ -76,6 +84,7 @@ impl RenderError {
             Self::NoMix => "RENDER_NO_MIX",
             Self::MixFileMissing { .. } => "RENDER_MIX_MISSING",
             Self::FfmpegMissing => "RENDER_FFMPEG_MISSING",
+            Self::SubtitleBurnUnsupported => "RENDER_SUBTITLE_BURN_UNSUPPORTED",
             Self::Cancelled => "RENDER_CANCELLED",
             Self::DiskFull => "RENDER_DISK_FULL",
             Self::InvalidOutputPath { .. } => "RENDER_INVALID_OUTPUT_PATH",

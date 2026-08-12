@@ -60,6 +60,20 @@ use super::models::{
 
 const PROGRESS_EMIT_MIN_INTERVAL_MS: u128 = 100;
 
+/// The defaults we advertise, adjusted for what this FFmpeg can do.
+///
+/// Burning is the default because a sidecar the viewer never loads reads as
+/// no subtitles at all. A build without libass can't burn, though, so
+/// offering it there would only produce a failed render — fall back to the
+/// sidecar, which at least lands beside the movie.
+pub(crate) fn default_settings_for(can_burn: bool) -> RenderSettings {
+    let mut s = RenderSettings::default();
+    if !can_burn && matches!(s.subtitle_mode, SubtitleMode::Burned) {
+        s.subtitle_mode = SubtitleMode::External;
+    }
+    s
+}
+
 const ADVERTISED_VIDEO_CODECS: &[&str] = &["copy", "libx264", "libx265", "libvpx-vp9"];
 const ADVERTISED_AUDIO_CODECS: &[&str] = &["aac", "libopus", "ac3", "mp3"];
 const ADVERTISED_FORMATS: &[&str] = &["mp4", "mkv"];
@@ -131,7 +145,8 @@ impl RenderService {
         Ok(RenderEnv {
             ffmpeg_available: av.available,
             ffmpeg_path: av.ffmpeg_path,
-            default_settings: RenderSettings::default(),
+            default_settings: default_settings_for(av.has_subtitles_filter),
+            subtitle_burn_available: av.has_subtitles_filter,
             video_codecs: ADVERTISED_VIDEO_CODECS
                 .iter()
                 .map(|s| (*s).to_string())
@@ -185,6 +200,16 @@ impl RenderService {
         request: RenderRequest,
     ) -> Result<RenderGenerateStart, RenderError> {
         let ffmpeg_svc = self.ffmpeg.get().ok_or(RenderError::FfmpegMissing)?;
+
+        // Catch a burn request against a build without libass here. Left to
+        // FFmpeg it fails deep into the run with "No option name near
+        // '/path/to.srt'", which reads like a broken path rather than a
+        // missing feature.
+        if matches!(request.settings.subtitle_mode, SubtitleMode::Burned)
+            && !ffmpeg_svc.has_subtitles_filter()
+        {
+            return Err(RenderError::SubtitleBurnUnsupported);
+        }
 
         let rec = self
             .projects
