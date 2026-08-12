@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .. import logging as log
 from ..errors import RpcErrorCode
@@ -84,17 +84,31 @@ class LlamaCppTranslationProvider(TranslationProvider):
             if ctx.cancelled():
                 raise ProviderCancelled()
 
+            label = f"chunk {i + 1}/{total_chunks}"
             ctx.on_progress(
                 i / total_chunks,
                 "translating",
-                f"chunk {i + 1}/{total_chunks} ({len(chunk.segment_ids)} segments)",
+                f"{label} ({len(chunk.segment_ids)} segments)",
             )
+
+            # Repairing a chunk can take longer than translating it did
+            # — the last resort is one request per segment. Give the
+            # repair its own slice of this chunk's share of the bar so
+            # the UI keeps moving instead of sitting frozen.
+            base = i / total_chunks
+            span = 1.0 / total_chunks
+
+            def report(within: float, message: str, _b=base, _s=span) -> None:
+                ctx.on_progress(_b + _s * within, "translating", message)
+
             chunk_map = self._translate_one_chunk(
                 llm=llm,
                 chunk=chunk,
                 segments_by_id=segments_by_id,
                 options=options,
                 ctx=ctx,
+                label=label,
+                report=report,
             )
             translations.update(chunk_map)
             ctx.on_chunk_completed(chunk.chunk_index, chunk_map)
@@ -266,6 +280,8 @@ class LlamaCppTranslationProvider(TranslationProvider):
         segments_by_id: dict[int, TranslatedSegment],
         options: TranslateOptions,
         ctx: TranslateContext,
+        label: str = "chunk",
+        report: Optional[Callable[[float, str], None]] = None,
     ) -> dict[int, str]:
         """Translate a chunk, recovering from partial LLM responses.
 
@@ -303,14 +319,29 @@ class LlamaCppTranslationProvider(TranslationProvider):
             )
             # Last resort: one request per segment. Slow, but a single
             # line is about as easy as the task gets.
-            batches = (
-                [[i] for i in missing]
-                if attempt == _MAX_REPAIR_ATTEMPTS - 1
-                else [missing]
-            )
-            for batch in batches:
+            per_segment = attempt == _MAX_REPAIR_ATTEMPTS - 1
+            batches = [[i] for i in missing] if per_segment else [missing]
+            # Repair occupies the back half of this chunk's slice, so
+            # the bar advances even when every segment needs its own
+            # request. Each attempt covers a third of that half.
+            attempt_base = 0.5 + 0.5 * (attempt / _MAX_REPAIR_ATTEMPTS)
+            attempt_span = 0.5 / _MAX_REPAIR_ATTEMPTS
+
+            for k, batch in enumerate(batches):
                 if ctx.cancelled():
                     raise ProviderCancelled()
+                if report is not None:
+                    within = attempt_base + attempt_span * (k / max(1, len(batches)))
+                    detail = (
+                        f"segment {batch[0]} ({k + 1}/{len(batches)})"
+                        if per_segment
+                        else f"{len(batch)} missing segments"
+                    )
+                    report(
+                        min(0.99, within),
+                        f"{label}: retrying {detail} "
+                        f"(attempt {attempt + 1}/{_MAX_REPAIR_ATTEMPTS})",
+                    )
                 translations.update(
                     self._attempt_ids(
                         llm=llm,

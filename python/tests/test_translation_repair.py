@@ -179,6 +179,45 @@ def test_gives_up_after_exhausting_retries(tmp_path):
     assert len(llm.calls) > 1
 
 
+def test_repair_reports_progress(tmp_path):
+    ids = [1, 2, 3]
+    llm = _ScriptedLlm([{1: "a"}, {2: "b", 3: "c"}])
+    seen: list[tuple[float, str]] = []
+    _provider(tmp_path)._translate_one_chunk(
+        llm=llm,
+        chunk=_chunk(ids),
+        segments_by_id=_segments(ids),
+        options=TranslateOptions(model="m.gguf"),
+        ctx=_FakeCtx(),
+        label="chunk 2/9",
+        report=lambda frac, msg: seen.append((frac, msg)),
+    )
+    assert seen, "repair must report progress; the bar froze otherwise"
+    fractions = [f for f, _ in seen]
+    assert fractions == sorted(fractions)
+    assert all(0.0 <= f <= 1.0 for f in fractions)
+    assert "chunk 2/9" in seen[0][1]
+
+
+def test_per_segment_repair_reports_each_segment(tmp_path):
+    ids = [4, 5, 6]
+    # Never satisfies the batch, forcing the one-request-per-segment round.
+    llm = _ScriptedLlm([{}])
+    seen: list[str] = []
+    with pytest.raises(ProviderError):
+        _provider(tmp_path)._translate_one_chunk(
+            llm=llm,
+            chunk=_chunk(ids),
+            segments_by_id=_segments(ids),
+            options=TranslateOptions(model="m.gguf"),
+            ctx=_FakeCtx(),
+            report=lambda frac, msg: seen.append(msg),
+        )
+    # The slowest path must narrate per segment, not go quiet.
+    assert any("segment 4" in m for m in seen)
+    assert any("segment 6 (3/3)" in m for m in seen)
+
+
 def test_context_ids_are_not_treated_as_missing(tmp_path):
     chunk = TranslationChunk(
         chunk_index=2,
