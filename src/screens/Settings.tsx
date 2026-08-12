@@ -9,6 +9,7 @@ import {
   type ModelKind,
   type PingResponse,
 } from "@/ipc/types";
+import { TopBar } from "../components/TopBar";
 
 export default function Settings() {
   const settings = useAppStore((s) => s.settings);
@@ -96,11 +97,34 @@ export default function Settings() {
     await updateSettings({ ffmpegPath: trimmed.length > 0 ? trimmed : null });
   }
 
-  if (!settings || !appInfo) return <div className="loading">Loading…</div>;
+  if (!settings || !appInfo) {
+    return (
+      <div className="app-shell">
+        <TopBar showDefaultTools={false} showSettingsLink={false} />
+        <main className="app-body plain">
+          <div className="plain-scroll">
+            <div className="loading">Loading settings…</div>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
-    <section className="settings">
-      <h1>Settings</h1>
+    <div className="app-shell">
+      <TopBar
+        showDefaultTools={false}
+        showSettingsLink={false}
+        subject={
+          <div className="topbar-project">
+            <span className="pname">Settings</span>
+            <span className="pmeta">Configure the editor and AI models</span>
+          </div>
+        }
+      />
+      <main className="app-body plain">
+        <div className="plain-scroll">
+          <section className="settings">
 
       <div className="panel">
         <h3>Application</h3>
@@ -262,11 +286,13 @@ export default function Settings() {
       <div className="panel">
         <h3>AI Models</h3>
         <p className="small" style={{ color: "var(--fg-muted)" }}>
-          Local Model Manager. Models live outside the application
-          bundle in the folder below. Nothing is downloaded
-          automatically — install models manually or use
-          <em> Add Local Model </em>
-          to point at a folder or file you already have.
+          Local Model Manager. Models live outside the application bundle in
+          the folder below. When you click <em>Transcribe</em>,{" "}
+          <em>Translate</em>, or <em>Generate voice</em> on a project, missing
+          models are auto-downloaded from Hugging Face on demand. Use this
+          screen to browse installed models, add local files with{" "}
+          <em>Add Local Model</em>, or pre-download extras before going
+          offline.
         </p>
 
         <div className="model-dir-row">
@@ -352,9 +378,12 @@ export default function Settings() {
         <div className="model-table">
           {filteredModels.length === 0 && !localModelsLoading && (
             <div className="small" style={{ color: "var(--fg-muted)" }}>
-              No models yet. Use <em>Add Local Model</em> below to register a
-              model you already downloaded (a Whisper snapshot folder, a
-              GGUF file, or a Piper voice pair).
+              No models yet. You can just open a project and click{" "}
+              <em>Transcribe</em>, <em>Translate</em>, or{" "}
+              <em>Generate voice</em> — the app will auto-download the
+              recommended Whisper / GGUF / Piper model on demand. Or use{" "}
+              <em>Add Local Model</em> below to register a model you already
+              have on disk.
             </div>
           )}
           {filteredModels.map((m) => (
@@ -521,9 +550,10 @@ export default function Settings() {
           </div>
           {translationModels.length === 0 && !translationModelsLoading && (
             <div className="small" style={{ color: "var(--fg-muted)" }}>
-              Drop a GGUF file into the models directory above and click
-              <em> Rescan</em>. Models are never downloaded automatically —
-              install them yourself and pick one in the project screen.
+              No GGUF installed. The easiest path: open a project and click{" "}
+              <em>Translate</em> — the app auto-downloads the recommended
+              Qwen 2.5 3B (~2 GB) on demand. Alternatively drop your own
+              GGUF into the models directory above and click <em>Rescan</em>.
             </div>
           )}
           {translationModels.map((m) => (
@@ -579,7 +609,10 @@ export default function Settings() {
           Ping worker
         </button>
       </div>
-    </section>
+          </section>
+        </div>
+      </main>
+    </div>
   );
 }
 

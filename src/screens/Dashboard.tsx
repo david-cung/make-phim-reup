@@ -4,6 +4,16 @@ import { useAppStore } from "@/state/store";
 import { api } from "@/ipc/bridge";
 import type { AppError, CreateProjectInput, JobSnapshot } from "@/ipc/types";
 import { TRANSLATION_LANGUAGES, isAppError } from "@/ipc/types";
+import { TopBar } from "../components/TopBar";
+import { IconFilm, IconPlus, IconTrash } from "../components/icons";
+
+// UI redesign — Dashboard is now the "Projects" workstation launcher.
+//
+// The screen renders inside the new shared shell (app-shell → topbar +
+// plain body) so it matches the Project editor's chrome. Content-wise
+// nothing was cut: the crash-recovery orphan banner, the first-run
+// helper, the project table, and the "New project" modal all still
+// bind to the same backend actions.
 
 export default function Dashboard() {
   const projects = useAppStore((s) => s.projects);
@@ -26,17 +36,14 @@ export default function Dashboard() {
     void refresh();
     void refreshModelDirectory();
     void refreshLocalModels();
-    // Phase 12 — surface jobs the crash-reaper marked as
-    // interrupted at startup. One-shot fetch; the list is
-    // stable until the user resumes/deletes the affected project.
+    // Phase 12 — surface jobs the crash-reaper marked as interrupted at
+    // startup so the user can resume them from the orphan banner.
     void api
       .listOrphanedJobs()
       .then((list) => setOrphaned(list))
       .catch(() => setOrphaned([]));
   }, [refresh, refreshModelDirectory, refreshLocalModels]);
 
-  // Phase 10 — first-run banner. Shown once, dismissible. Never
-  // pushes the user online.
   const showFirstRunBanner = useMemo(() => {
     if (!settings) return false;
     return !settings.firstRunCompleted;
@@ -50,10 +57,11 @@ export default function Dashboard() {
   const orphanedByProject = useMemo(() => {
     const byId = new Map<string, JobSnapshot>();
     for (const j of orphaned) {
-      // Keep only the most recent orphaned stage per project so the
-      // banner stays terse even after several bad runs.
       const prev = byId.get(j.projectId);
-      if (!prev || (j.completedAt ?? j.createdAt) > (prev.completedAt ?? prev.createdAt)) {
+      if (
+        !prev ||
+        (j.completedAt ?? j.createdAt) > (prev.completedAt ?? prev.createdAt)
+      ) {
         byId.set(j.projectId, j);
       }
     }
@@ -61,128 +69,180 @@ export default function Dashboard() {
   }, [orphaned]);
 
   return (
-    <section className="dashboard">
-      {!orphanBannerDismissed && orphanedByProject.length > 0 && (
-        <div className="orphan-banner">
-          <div>
-            <strong>Some jobs didn't finish last time.</strong> Nothing was
-            lost — completed segments are still on disk. Reopen the project
-            below and re-run the affected stage to pick up where you left off.
-            <ul className="orphan-banner-list">
-              {orphanedByProject.slice(0, 5).map((j) => {
-                const project = projects.find((p) => p.id === j.projectId);
-                return (
-                  <li key={j.id}>
-                    <Link to={`/projects/${j.projectId}`}>
-                      {project?.name ?? j.projectId.slice(0, 8)}
-                    </Link>{" "}
-                    · interrupted during <em>{j.stage}</em>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
+    <div className="app-shell">
+      <TopBar
+        showDefaultTools={false}
+        actions={
           <button
-            className="btn ghost small"
-            onClick={() => setOrphanBannerDismissed(true)}
+            className="btn primary"
+            onClick={() => setModalOpen(true)}
+            title="Create a new movie translation project"
           >
-            Dismiss
+            <IconPlus size={14} />
+            <span>New Project</span>
           </button>
-        </div>
-      )}
+        }
+      />
 
-      {showFirstRunBanner && (
-        <div className="first-run-banner">
-          <div>
-            <strong>Welcome!</strong> Local Movie Translator runs entirely
-            offline once models are installed. It never downloads models on
-            your behalf.{" "}
-            {availableModels === 0 ? (
-              <>
-                No models are installed yet — head to{" "}
-                <Link to="/settings">Settings → AI Models</Link> to point at a
-                Whisper folder, a translation GGUF, or a Piper voice.
-              </>
-            ) : (
-              <>
-                Found {availableModels} local model
-                {availableModels === 1 ? "" : "s"}
-                {modelDirectory ? (
+      <main className="app-body plain">
+        <div className="plain-scroll">
+          {!orphanBannerDismissed && orphanedByProject.length > 0 && (
+            <div className="orphan-banner">
+              <div>
+                <strong>Some jobs didn't finish last time.</strong> Nothing was
+                lost — completed segments are still on disk. Reopen the project
+                and re-run the affected stage to pick up where you left off.
+                <ul className="orphan-banner-list">
+                  {orphanedByProject.slice(0, 5).map((j) => {
+                    const project = projects.find((p) => p.id === j.projectId);
+                    return (
+                      <li key={j.id}>
+                        <Link to={`/projects/${j.projectId}`}>
+                          {project?.name ?? j.projectId.slice(0, 8)}
+                        </Link>{" "}
+                        · interrupted during <em>{j.stage}</em>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+              <button
+                className="btn ghost small"
+                onClick={() => setOrphanBannerDismissed(true)}
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {showFirstRunBanner && (
+            <div className="first-run-banner">
+              <div>
+                <strong>Welcome to Local Movie Translator.</strong> Everything
+                runs on your machine — audio never leaves your device.{" "}
+                {availableModels === 0 ? (
                   <>
-                    {" "}in <span className="mono">{modelDirectory.path}</span>
+                    No AI models yet — that's fine. Create a project, click{" "}
+                    <em>Transcribe</em>, <em>Translate</em>, or{" "}
+                    <em>Generate voice</em> and the app will download the
+                    recommended Whisper / GGUF / Piper model on demand. Manage
+                    them any time from{" "}
+                    <Link to="/settings">Settings → AI Models</Link>.
                   </>
-                ) : null}
-                . Manage them any time in{" "}
-                <Link to="/settings">Settings → AI Models</Link>.
-              </>
-            )}
-          </div>
-          <button
-            className="btn ghost small"
-            onClick={() => void markFirstRunCompleted()}
-          >
-            Got it
-          </button>
+                ) : (
+                  <>
+                    Found {availableModels} local model
+                    {availableModels === 1 ? "" : "s"}
+                    {modelDirectory ? (
+                      <>
+                        {" "}
+                        in{" "}
+                        <span className="mono">{modelDirectory.path}</span>
+                      </>
+                    ) : null}
+                    . Missing models auto-download on first use.
+                  </>
+                )}
+              </div>
+              <button
+                className="btn ghost small"
+                onClick={() => void markFirstRunCompleted()}
+              >
+                Got it
+              </button>
+            </div>
+          )}
+
+          <header className="dashboard-header">
+            <div>
+              <h1>Projects</h1>
+              <div className="dashboard-sub">
+                {projects.length === 0
+                  ? "No projects yet."
+                  : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
+              </div>
+            </div>
+          </header>
+
+          {error ? <div className="banner banner--error">{error}</div> : null}
+
+          {projects.length === 0 ? (
+            <div className="panel">
+              <div className="empty-state">
+                <div className="icon-64" aria-hidden="true">
+                  <IconFilm size={22} />
+                </div>
+                <div className="empty-title">
+                  Import a movie to start translating
+                </div>
+                <div className="empty-hint">
+                  Create a project, drop in a video, and Local Movie Translator
+                  will transcribe, translate, dub and re-render it — entirely
+                  on-device.
+                </div>
+                <button
+                  className="btn primary"
+                  onClick={() => setModalOpen(true)}
+                >
+                  <IconPlus size={14} />
+                  <span>New Project</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <table className="projects-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Languages</th>
+                  <th>Status</th>
+                  <th>Updated</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {projects.map((p) => (
+                  <tr key={p.id}>
+                    <td>
+                      <Link to={`/projects/${p.id}`}>{p.name}</Link>
+                    </td>
+                    <td>
+                      <span className="mono">
+                        {p.sourceLanguage} → {p.targetLanguage}
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`status status--${p.status}`}>
+                        {p.status}
+                      </span>
+                    </td>
+                    <td className="muted">
+                      {new Date(p.updatedAt).toLocaleString()}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <button
+                        className="btn icon"
+                        title={`Delete ${p.name}`}
+                        aria-label={`Delete ${p.name}`}
+                        onClick={async () => {
+                          if (!confirm(`Delete "${p.name}"?`)) return;
+                          try {
+                            await deleteProject(p.id);
+                          } catch (e) {
+                            setError(formatDashboardError(e));
+                          }
+                        }}
+                      >
+                        <IconTrash size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
-      )}
-
-      <header className="dashboard-header">
-        <h1>Projects</h1>
-        <button className="btn primary" onClick={() => setModalOpen(true)}>
-          + New Project
-        </button>
-      </header>
-
-      {error ? <div className="error-panel small">{error}</div> : null}
-
-      {projects.length === 0 ? (
-        <div className="empty-state">
-          <p>No projects yet. Create one to get started.</p>
-        </div>
-      ) : (
-        <table className="projects-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Source → Target</th>
-              <th>Status</th>
-              <th>Updated</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {projects.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  <Link to={`/projects/${p.id}`}>{p.name}</Link>
-                </td>
-                <td>
-                  {p.sourceLanguage} → {p.targetLanguage}
-                </td>
-                <td>
-                  <span className={`status status--${p.status}`}>{p.status}</span>
-                </td>
-                <td>{new Date(p.updatedAt).toLocaleString()}</td>
-                <td>
-                  <button
-                    className="btn ghost danger"
-                    onClick={async () => {
-                      if (!confirm(`Delete "${p.name}"?`)) return;
-                      try {
-                        await deleteProject(p.id);
-                      } catch (e) {
-                        setError(formatDashboardError(e));
-                      }
-                    }}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      </main>
 
       {modalOpen ? (
         <NewProjectModal
@@ -198,7 +258,7 @@ export default function Dashboard() {
           }}
         />
       ) : null}
-    </section>
+    </div>
   );
 }
 
@@ -224,8 +284,12 @@ function NewProjectModal(props: {
     <div className="modal-backdrop" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h2>New project</h2>
+        <div className="modal-hint">
+          Pick the source language of the movie and the language you want to
+          dub it into. You can change these later.
+        </div>
         <label>
-          Name
+          Project name
           <input
             type="text"
             value={name}

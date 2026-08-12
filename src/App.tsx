@@ -1,9 +1,17 @@
 import { useEffect } from "react";
-import { NavLink, Route, Routes, Navigate } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import Dashboard from "./screens/Dashboard";
 import ProjectView from "./screens/Project";
 import Settings from "./screens/Settings";
 import { useAppStore } from "./state/store";
+
+// UI redesign — the App shell is intentionally minimal now.
+//
+// Previously this file also rendered the app-wide sidebar and worker
+// badge; the new professional editor design gives every screen its own
+// top bar (`components/TopBar.tsx`) because the Project view uses a
+// completely different multi-pane editor layout than Dashboard/Settings.
+// Keeping App.tsx focused on routing + bootstrap avoids double chrome.
 
 export default function App() {
   const bootstrap = useAppStore((s) => s.bootstrap);
@@ -14,52 +22,33 @@ export default function App() {
     void bootstrap();
   }, [bootstrap]);
 
-  return (
-    <div className="app-shell">
-      <aside className="app-sidebar">
-        <div className="app-title">Local Movie Translator</div>
-        <nav className="app-nav">
-          <NavLink to="/" end>Dashboard</NavLink>
-          <NavLink to="/settings">Settings</NavLink>
-        </nav>
-        <div className="app-sidebar-footer">
-          <WorkerBadge />
+  if (!bootReady && !bootError) {
+    return (
+      <div className="app-shell">
+        <div className="loading" style={{ margin: "auto" }}>
+          Starting Local Movie Translator…
         </div>
-      </aside>
+      </div>
+    );
+  }
 
-      <main className="app-main">
-        {!bootReady && !bootError ? (
-          <div className="loading">Starting…</div>
-        ) : bootError ? (
-          <div className="error-panel">
-            <h2>Application failed to start</h2>
-            <pre>{bootError}</pre>
-          </div>
-        ) : (
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/projects/:id" element={<ProjectView />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        )}
-      </main>
-    </div>
-  );
-}
+  if (bootError) {
+    return (
+      <div className="app-shell">
+        <div className="error-panel">
+          <h2>Application failed to start</h2>
+          <pre>{bootError}</pre>
+        </div>
+      </div>
+    );
+  }
 
-function WorkerBadge() {
-  const worker = useAppStore((s) => s.worker);
-  const dot =
-    worker.state === "running" ? "ok"
-    : worker.state === "starting" ? "warn"
-    : worker.state === "stopped" ? "muted"
-    : "err";
   return (
-    <div className={`worker-badge worker-badge--${dot}`}>
-      <span className="worker-dot" />
-      <span className="worker-label">Worker: {worker.state}</span>
-      {worker.pid ? <span className="worker-pid">pid {worker.pid}</span> : null}
-    </div>
+    <Routes>
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/projects/:id" element={<ProjectView />} />
+      <Route path="/settings" element={<Settings />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
