@@ -15,6 +15,11 @@ use crate::errors::AppError;
 use crate::ffmpeg::extract::AudioExtractParams;
 use crate::ffmpeg::{probe, FfmpegAvailability, VideoMetadata};
 use crate::ipc::{AppInfo, ProjectMediaState};
+use crate::integrations::youtube::{
+    YouTubeAccount, YouTubeConnectionState, YouTubeError, YouTubePlaylist, YouTubePublishOptions,
+    YouTubePublishingHistoryEntry, YouTubeThumbnailResult, YouTubeUploadSnapshot,
+    YouTubeVideoMetadata,
+};
 use crate::jobs::{JobSnapshot, JobStage, JobsRepo};
 use crate::mix::{
     MixEnv, MixGenerateStart, MixManifest, MixRequest, MixSettings, MixSummary, PreviewMixResult,
@@ -24,7 +29,8 @@ use crate::models::{
 };
 use crate::projects::service::{CreateProjectInput, ImportMediaInput, ImportMediaResult};
 use crate::render::{
-    RenderEnv, RenderGenerateStart, RenderManifest, RenderRequest, RenderSettings, RenderSummary,
+    RenderEnv, RenderGenerateStart, RenderManifest, RenderRequest, RenderSettings, RenderStatus,
+    RenderSummary,
 };
 use crate::stt::{ModelInfo, SttEnv, SttOptions, TranscribeStart, TranscriptSummary};
 use crate::subtitles::{
@@ -75,6 +81,9 @@ pub async fn update_settings(
     patch: AppSettingsPatch,
 ) -> Result<AppSettings, AppError> {
     let updated = state.settings.update(patch.clone())?;
+    if patch.offline_mode == Some(true) {
+        state.youtube.cancel_all_uploads();
+    }
     // Any settings change that touches ffmpeg_path triggers a re-detect.
     if patch.ffmpeg_path.is_some() {
         let _ = state.refresh_ffmpeg().await;
@@ -1373,6 +1382,197 @@ pub async fn clear_logs(state: State<'_, AppState>) -> Result<usize, AppError> {
 pub async fn list_orphaned_jobs(state: State<'_, AppState>) -> Result<Vec<JobSnapshot>, AppError> {
     let db = state.db.clone();
     Ok(db.run(crate::jobs::JobsRepo::list_orphaned).await?)
+}
+
+// ---------- Phase 13 (optional YouTube integration) ----------
+
+#[tauri::command]
+pub async fn get_youtube_state(
+    state: State<'_, AppState>,
+) -> Result<YouTubeConnectionState, AppError> {
+    let offline = state.settings.snapshot().offline_mode;
+    Ok(state.youtube.connection_state(offline))
+}
+
+#[tauri::command]
+pub async fn connect_youtube(
+    state: State<'_, AppState>,
+) -> Result<YouTubeConnectionState, AppError> {
+    if state.settings.snapshot().offline_mode {
+        return Err(AppError::from(YouTubeError::Offline));
+    }
+    Ok(state.youtube.connect().await?)
+}
+
+#[tauri::command]
+pub async fn disconnect_youtube(
+    state: State<'_, AppState>,
+) -> Result<YouTubeConnectionState, AppError> {
+    let offline = state.settings.snapshot().offline_mode;
+    Ok(state.youtube.disconnect(offline)?)
+}
+
+#[tauri::command]
+pub async fn list_youtube_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<YouTubeAccount>, AppError> {
+    Ok(state.youtube.list_accounts())
+}
+
+#[tauri::command]
+pub async fn select_youtube_account(
+    state: State<'_, AppState>,
+    account_id: String,
+) -> Result<YouTubeConnectionState, AppError> {
+    let offline = state.settings.snapshot().offline_mode;
+    Ok(state.youtube.select_account(&account_id, offline)?)
+}
+
+#[tauri::command]
+pub async fn list_youtube_playlists(
+    state: State<'_, AppState>,
+) -> Result<Vec<YouTubePlaylist>, AppError> {
+    if state.settings.snapshot().offline_mode {
+        return Err(AppError::from(YouTubeError::Offline));
+    }
+    Ok(state.youtube.list_playlists().await?)
+}
+
+#[tauri::command]
+pub async fn start_youtube_upload(
+    state: State<'_, AppState>,
+    project_id: String,
+    metadata: YouTubeVideoMetadata,
+    options: Option<YouTubePublishOptions>,
+) -> Result<YouTubeUploadSnapshot, AppError> {
+    if state.settings.snapshot().offline_mode {
+        return Err(AppError::from(YouTubeError::Offline));
+    }
+    // The frontend never supplies an unrestricted file path. Resolve the
+    // current, validated Phase 9 render from the selected project instead.
+    let manifest = state
+        .render
+        .get_manifest(project_id.clone())
+        .await?
+        .ok_or_else(|| YouTubeError::InvalidVideo("No rendered movie is available.".into()))?;
+    let summary = state
+        .render
+        .get_summary(project_id.clone(), manifest.settings.clone())
+        .await?
+        .ok_or_else(|| YouTubeError::InvalidVideo("No rendered movie is available.".into()))?;
+    if summary.status != RenderStatus::Ready {
+        return Err(AppError::from(YouTubeError::InvalidVideo(
+            "The current project render is missing or stale. Render it again before publishing."
+                .into(),
+        )));
+    }
+    let rendered = manifest.current.ok_or_else(|| {
+        YouTubeError::InvalidVideo("The project has no completed render to upload.".into())
+    })?;
+    if summary.absolute_path.as_deref() != Some(rendered.file_absolute.as_str()) {
+        return Err(AppError::from(YouTubeError::InvalidVideo(
+            "The ready render summary does not match the current render manifest.".into(),
+        )));
+    }
+    let project = state.projects.open(project_id.clone()).await?;
+    let options = options.unwrap_or_default();
+    let subtitle_doc = if options.publish_translated_subtitles
+        || options.publish_original_subtitles
+    {
+        state.subtitles.get_doc(project_id.clone()).await?
+    } else {
+        None
+    };
+    Ok(state
+        .youtube
+        .start_upload(
+            project_id,
+            PathBuf::from(project.root_path),
+            PathBuf::from(rendered.file_absolute),
+            metadata,
+            options,
+            subtitle_doc,
+        )?)
+}
+
+#[tauri::command]
+pub async fn list_youtube_uploads(
+    state: State<'_, AppState>,
+) -> Result<Vec<YouTubeUploadSnapshot>, AppError> {
+    Ok(state.youtube.list_uploads())
+}
+
+#[tauri::command]
+pub async fn cancel_youtube_upload(
+    state: State<'_, AppState>,
+    upload_id: String,
+) -> Result<(), AppError> {
+    Ok(state.youtube.cancel_upload(&upload_id)?)
+}
+
+#[tauri::command]
+pub async fn retry_youtube_upload(
+    state: State<'_, AppState>,
+    upload_id: String,
+) -> Result<YouTubeUploadSnapshot, AppError> {
+    if state.settings.snapshot().offline_mode {
+        return Err(AppError::from(YouTubeError::Offline));
+    }
+    Ok(state.youtube.retry_upload(&upload_id)?)
+}
+
+#[tauri::command]
+pub async fn open_youtube_video(
+    state: State<'_, AppState>,
+    video_id: String,
+) -> Result<(), AppError> {
+    Ok(state.youtube.open_video(&video_id)?)
+}
+
+#[tauri::command]
+pub async fn generate_youtube_thumbnail(
+    state: State<'_, AppState>,
+    project_id: String,
+    time_seconds: f64,
+) -> Result<YouTubeThumbnailResult, AppError> {
+    let project = state.projects.open(project_id.clone()).await?;
+    let manifest = state
+        .render
+        .get_manifest(project_id)
+        .await?
+        .ok_or_else(|| YouTubeError::InvalidVideo("No rendered movie is available.".into()))?;
+    let rendered = manifest.current.ok_or_else(|| {
+        YouTubeError::InvalidVideo("The project has no completed render.".into())
+    })?;
+    Ok(state
+        .youtube
+        .generate_thumbnail(
+            &PathBuf::from(project.root_path),
+            &PathBuf::from(rendered.file_absolute),
+            time_seconds,
+        )
+        .await?)
+}
+
+#[tauri::command]
+pub async fn validate_youtube_thumbnail(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<YouTubeThumbnailResult, AppError> {
+    Ok(state
+        .youtube
+        .validate_thumbnail_selection(&PathBuf::from(path))?)
+}
+
+#[tauri::command]
+pub async fn list_youtube_history(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<YouTubePublishingHistoryEntry>, AppError> {
+    let project = state.projects.open(project_id).await?;
+    Ok(state
+        .youtube
+        .list_history(&PathBuf::from(project.root_path))?)
 }
 
 #[allow(dead_code)]

@@ -19,6 +19,7 @@ pub mod db;
 pub mod errors;
 pub mod ffmpeg;
 pub mod ipc;
+pub mod integrations;
 pub mod jobs;
 pub mod logging;
 pub mod media;
@@ -164,6 +165,21 @@ pub fn run() {
             commands::clear_cache,
             commands::clear_logs,
             commands::list_orphaned_jobs,
+            // Phase 13 — optional YouTube integration
+            commands::get_youtube_state,
+            commands::connect_youtube,
+            commands::disconnect_youtube,
+            commands::list_youtube_accounts,
+            commands::select_youtube_account,
+            commands::list_youtube_playlists,
+            commands::start_youtube_upload,
+            commands::list_youtube_uploads,
+            commands::cancel_youtube_upload,
+            commands::retry_youtube_upload,
+            commands::open_youtube_video,
+            commands::generate_youtube_thumbnail,
+            commands::validate_youtube_thumbnail,
+            commands::list_youtube_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

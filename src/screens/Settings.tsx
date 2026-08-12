@@ -8,6 +8,7 @@ import {
   type LocalModel,
   type ModelKind,
   type PingResponse,
+  type YouTubeConnectionState,
 } from "@/ipc/types";
 import { TopBar } from "../components/TopBar";
 
@@ -139,6 +140,8 @@ export default function Settings() {
       </div>
 
       <StoragePanel />
+
+      <YouTubeSettingsPanel />
 
       <div className="panel">
         <h3>Preferences</h3>
@@ -658,6 +661,64 @@ function errorMessage(err: unknown): string {
   } catch {
     return String(err);
   }
+}
+
+function YouTubeSettingsPanel() {
+  const [state, setState] = useState<YouTubeConnectionState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void api.getYouTubeState().then(setState).catch((reason) => {
+      setError(errorMessage(reason));
+    });
+  }, []);
+
+  const disconnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await api.disconnectYouTube());
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <h3>YouTube Account</h3>
+      {state?.status === "connected" ? (
+        <>
+          <Kv
+            k="Connected"
+            v={state.account?.channelTitle ?? "YouTube channel"}
+          />
+          <Kv
+            k="Channel ID"
+            v={state.account?.channelId ?? "Unavailable"}
+            mono
+          />
+          <div className="actions">
+            <button className="btn danger" disabled={busy} onClick={disconnect}>
+              {busy ? "Disconnecting…" : "Disconnect"}
+            </button>
+          </div>
+          <p className="small muted">
+            Disconnecting removes credentials from secure OS storage. Project
+            publishing history is retained.
+          </p>
+        </>
+      ) : (
+        <p className="small muted">
+          No YouTube account is connected. Connect from a project’s Publish
+          panel.
+        </p>
+      )}
+      {error && <div className="banner banner--error small">{error}</div>}
+    </div>
+  );
 }
 
 function ModelRow(props: { model: LocalModel }) {

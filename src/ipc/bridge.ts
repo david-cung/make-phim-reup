@@ -82,6 +82,15 @@ import {
   type VoiceInfo,
   type WhisperModelInfo,
   type WorkerStatus,
+  type YouTubeConnectionState,
+  type YouTubeAccount,
+  type YouTubePlaylist,
+  type YouTubePublishingHistoryEntry,
+  type YouTubePublishOptions,
+  type YouTubeThumbnailResult,
+  type YouTubeUploadProgressEvent,
+  type YouTubeUploadSnapshot,
+  type YouTubeVideoMetadata,
   isAppError,
 } from "./types";
 
@@ -368,6 +377,50 @@ export const api = {
   listOrphanedJobs: () => invoke<JobSnapshot[]>("list_orphaned_jobs"),
   updateProjectModels: (projectId: string, patch: ProjectModelPatch) =>
     invoke<Project>("update_project_models", { projectId, patch }),
+
+  // Phase 13 — OAuth and uploads stay in the Rust host. Tokens and
+  // resumable session URLs never cross IPC into React.
+  getYouTubeState: () =>
+    invoke<YouTubeConnectionState>("get_youtube_state"),
+  connectYouTube: () =>
+    invoke<YouTubeConnectionState>("connect_youtube"),
+  disconnectYouTube: () =>
+    invoke<YouTubeConnectionState>("disconnect_youtube"),
+  listYouTubeAccounts: () =>
+    invoke<YouTubeAccount[]>("list_youtube_accounts"),
+  selectYouTubeAccount: (accountId: string) =>
+    invoke<YouTubeConnectionState>("select_youtube_account", { accountId }),
+  listYouTubePlaylists: () =>
+    invoke<YouTubePlaylist[]>("list_youtube_playlists"),
+  startYouTubeUpload: (
+    projectId: string,
+    metadata: YouTubeVideoMetadata,
+    options?: YouTubePublishOptions,
+  ) =>
+    invoke<YouTubeUploadSnapshot>("start_youtube_upload", {
+      projectId,
+      metadata,
+      options,
+    }),
+  listYouTubeUploads: () =>
+    invoke<YouTubeUploadSnapshot[]>("list_youtube_uploads"),
+  cancelYouTubeUpload: (uploadId: string) =>
+    invoke<void>("cancel_youtube_upload", { uploadId }),
+  retryYouTubeUpload: (uploadId: string) =>
+    invoke<YouTubeUploadSnapshot>("retry_youtube_upload", { uploadId }),
+  openYouTubeVideo: (videoId: string) =>
+    invoke<void>("open_youtube_video", { videoId }),
+  generateYouTubeThumbnail: (projectId: string, timeSeconds: number) =>
+    invoke<YouTubeThumbnailResult>("generate_youtube_thumbnail", {
+      projectId,
+      timeSeconds,
+    }),
+  validateYouTubeThumbnail: (path: string) =>
+    invoke<YouTubeThumbnailResult>("validate_youtube_thumbnail", { path }),
+  listYouTubeHistory: (projectId: string) =>
+    invoke<YouTubePublishingHistoryEntry[]>("list_youtube_history", {
+      projectId,
+    }),
 };
 
 /**
@@ -431,6 +484,14 @@ export function onSyncSegmentCompleted(
   );
 }
 
+export function onYouTubeUpload(
+  cb: (upload: YouTubeUploadProgressEvent["upload"]) => void,
+): Promise<UnlistenFn> {
+  return listen<YouTubeUploadProgressEvent>("youtube://upload", (evt) =>
+    cb(evt.payload.upload),
+  );
+}
+
 /**
  * Open the native file picker constrained to the supported video
  * extensions. Returns the selected absolute path, or `null` if the
@@ -443,6 +504,21 @@ export async function pickMediaFile(): Promise<string | null> {
       {
         name: "Video",
         extensions: ["mp4", "m4v", "mkv", "mov", "avi", "webm"],
+      },
+    ],
+  });
+  if (result == null) return null;
+  return typeof result === "string" ? result : (result as { path: string }).path;
+}
+
+/** Explicit local image selection for a YouTube custom thumbnail. */
+export async function pickYouTubeThumbnail(): Promise<string | null> {
+  const result = await openDialog({
+    multiple: false,
+    filters: [
+      {
+        name: "Thumbnail image",
+        extensions: ["jpg", "jpeg", "png", "webp"],
       },
     ],
   });

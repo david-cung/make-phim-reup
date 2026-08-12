@@ -10,6 +10,7 @@ use crate::audio::ExtractError;
 use crate::db::DbError;
 use crate::ffmpeg::FfmpegError;
 use crate::jobs::JobRegistryError;
+use crate::integrations::youtube::YouTubeError;
 use crate::mix::MixError;
 use crate::models::ModelManagerError;
 use crate::paths::PathError;
@@ -657,6 +658,41 @@ impl From<ModelManagerError> for AppError {
             e = e.with_hint(h);
         }
         e
+    }
+}
+
+impl From<YouTubeError> for AppError {
+    fn from(err: YouTubeError) -> Self {
+        let mut error = if err.recoverable() {
+            AppError::recoverable(err.code(), err.to_string())
+        } else {
+            AppError::new(err.code(), err.to_string())
+        }
+        .with_stage("youtube");
+        error.hint = match &err {
+            YouTubeError::NotConfigured => Some(
+                "Configure LMT_YOUTUBE_CLIENT_ID for a Google Desktop OAuth client, then restart the app."
+                    .into(),
+            ),
+            YouTubeError::Offline => {
+                Some("Turn off Offline Mode before connecting or uploading.".into())
+            }
+            YouTubeError::AuthenticationRequired => {
+                Some("Reconnect the YouTube account, then retry the upload.".into())
+            }
+            YouTubeError::QuotaExceeded => Some(
+                "The Google Cloud project's YouTube quota is exhausted. Wait for quota reset or request more quota."
+                    .into(),
+            ),
+            YouTubeError::Network(_) => {
+                Some("Check the internet connection, then retry the resumable upload.".into())
+            }
+            YouTubeError::InvalidVideo(_) => {
+                Some("Render a valid local movie before uploading.".into())
+            }
+            _ => None,
+        };
+        error
     }
 }
 

@@ -9,6 +9,7 @@ import {
 } from "@/ipc/bridge";
 import { useAppStore } from "@/state/store";
 import { TopBar } from "../components/TopBar";
+import { YouTubePanel } from "../components/YouTubePanel";
 import {
   IconExport,
   IconFolder,
@@ -2024,6 +2025,16 @@ export default function ProjectView() {
                           onCancel={handleRenderCancel}
                           onPickOutputPath={handleRenderPickOutput}
                           onClearOutputPath={handleRenderClearOutput}
+                        />
+                      </Panel>
+                      <Panel title="Publish">
+                        <YouTubePanel
+                          projectId={project.id}
+                          projectName={project.name}
+                          sourceLanguage={project.sourceLanguage}
+                          targetLanguage={project.targetLanguage}
+                          render={media?.render ?? null}
+                          subtitles={media?.subtitles ?? null}
                         />
                       </Panel>
                     </div>

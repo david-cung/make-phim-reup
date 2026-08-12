@@ -1139,3 +1139,112 @@ export interface StorageStats {
   modelsDir: string;
   modelsBytes: number;
 }
+
+// ---------- Phase 13 (optional YouTube integration) ----------
+
+export interface YouTubeAccount {
+  id: string;
+  channelId: string | null;
+  channelTitle: string | null;
+  thumbnailUrl: string | null;
+  connectedAt: string;
+}
+
+export type YouTubeAccountStatus =
+  | "connected"
+  | "disconnected"
+  | "expired"
+  | "authenticationRequired";
+
+export interface YouTubeConnectionState {
+  configured: boolean;
+  status: YouTubeAccountStatus;
+  account: YouTubeAccount | null;
+  offline: boolean;
+}
+
+export type YouTubePrivacyStatus = "private" | "unlisted" | "public";
+
+export interface YouTubeVideoMetadata {
+  title: string;
+  description: string;
+  tags: string[];
+  privacyStatus: YouTubePrivacyStatus;
+  categoryId: string;
+  defaultLanguage?: string | null;
+}
+
+export interface YouTubePublishOptions {
+  playlistId?: string | null;
+  thumbnailPath?: string | null;
+  publishTranslatedSubtitles: boolean;
+  publishOriginalSubtitles: boolean;
+}
+
+export interface YouTubePlaylist {
+  id: string;
+  name: string;
+}
+
+export type YouTubeAssetStepState = "pending" | "completed" | "failed";
+
+export interface YouTubeAssetStep {
+  kind:
+    | "playlist"
+    | "thumbnail"
+    | "translatedSubtitles"
+    | "originalSubtitles"
+    | "status"
+    | "history";
+  state: YouTubeAssetStepState;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface YouTubePublishingHistoryEntry {
+  videoId: string;
+  title: string;
+  privacyStatus: YouTubePrivacyStatus;
+  uploadedAt: string;
+  channelId: string;
+  url: string;
+}
+
+export interface YouTubeThumbnailResult {
+  path: string;
+  timeSeconds: number;
+}
+
+export type YouTubeUploadState =
+  | "idle"
+  | "waiting"
+  | "connecting"
+  | "preparing"
+  | "uploading"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface YouTubeUploadSnapshot {
+  id: string;
+  projectId: string;
+  createdAt: string;
+  state: YouTubeUploadState;
+  filePath: string;
+  bytesUploaded: number;
+  totalBytes: number;
+  progress: number;
+  videoId: string | null;
+  url: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  canRetry: boolean;
+  title: string;
+  privacyStatus: YouTubePrivacyStatus;
+  assetSteps: YouTubeAssetStep[];
+}
+
+export interface YouTubeUploadProgressEvent {
+  upload: YouTubeUploadSnapshot;
+}

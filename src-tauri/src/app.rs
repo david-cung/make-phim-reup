@@ -13,6 +13,7 @@ use crate::config::SettingsStore;
 use crate::db::{Db, DbHandle};
 use crate::ffmpeg::detection::{FfmpegAvailability, FfmpegHandle, FfmpegPathOverride};
 use crate::jobs::{JobRegistry, JobsRepo};
+use crate::integrations::youtube::YouTubeService;
 use crate::mix::MixService;
 use crate::models::ModelRegistry;
 use crate::paths::AppPaths;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub sync: Arc<SyncService>,
     pub mix: Arc<MixService>,
     pub render: Arc<RenderService>,
+    pub youtube: Arc<YouTubeService>,
     pub models: ModelRegistry,
 }
 
@@ -147,13 +149,17 @@ impl AppState {
             ffmpeg.clone(),
         );
         let render = RenderService::new(
-            app,
+            app.clone(),
             db.clone(),
             projects.clone(),
             subtitles.clone(),
             jobs.clone(),
             ffmpeg.clone(),
         );
+        // Phase 13 stays isolated from the local media pipeline. Constructing
+        // the service performs no network traffic; OAuth and API calls only
+        // happen after an explicit YouTube action.
+        let youtube = YouTubeService::new(app, &paths.config_dir, ffmpeg.clone());
         // Phase 10 — thin aggregation layer over the per-stage
         // Python-side registries. Zero-cost until the UI actually
         // asks for a scan.
@@ -202,6 +208,7 @@ impl AppState {
             sync,
             mix,
             render,
+            youtube,
             models,
         })
     }
