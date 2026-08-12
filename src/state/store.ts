@@ -61,6 +61,7 @@ import type {
   TranslationSummary,
   TtsEnv,
   TtsManifest,
+  TtsRecommendedVoicePreset,
   TtsSettings,
   TtsSummary,
   VoiceInfo,
@@ -181,6 +182,10 @@ interface AppState {
   ttsEnv: TtsEnv | null;
   ttsVoices: VoiceInfo[];
   ttsVoicesLoading: boolean;
+  // Phase 12 — curated auto-download presets, mirrors
+  // `translationRecommendedPresets` / `whisperModels`.
+  ttsRecommendedVoices: TtsRecommendedVoicePreset[];
+  ttsRecommendedLoading: boolean;
   currentTtsManifest: TtsManifest | null;
   currentTtsManifestLoading: boolean;
   ttsEngine: string;
@@ -297,6 +302,8 @@ interface AppState {
   // Phase 6
   refreshTtsEnv: () => Promise<TtsEnv | null>;
   refreshTtsVoices: () => Promise<VoiceInfo[]>;
+  refreshTtsRecommendedVoices: () => Promise<TtsRecommendedVoicePreset[]>;
+  downloadTtsVoice: (preset: string) => Promise<void>;
   loadTtsManifest: (projectId: string) => Promise<TtsManifest | null>;
   refreshTtsSummary: (projectId: string) => Promise<TtsSummary | null>;
   setTtsEngine: (engine: string) => void;
@@ -411,6 +418,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   ttsEnv: null,
   ttsVoices: [],
   ttsVoicesLoading: false,
+  ttsRecommendedVoices: [],
+  ttsRecommendedLoading: false,
   currentTtsManifest: null,
   currentTtsManifestLoading: false,
   ttsEngine: "piper",
@@ -497,6 +506,26 @@ export const useAppStore = create<AppState>((set, get) => ({
                   void get().refreshMedia(snap.projectId);
                   if (snap.stage === "translate") {
                     void get().loadTranslationDoc(snap.projectId);
+                    // Phase 12 UX — auto-build subtitles the
+                    // moment translation finishes. Every downstream
+                    // stage (TTS, sync, mix, render, export) is
+                    // gated on the subtitle doc existing, so
+                    // making the user click "Build subtitles"
+                    // manually was the #2 friction point after
+                    // "Extract audio". `rebuildSubtitles` is safe
+                    // to call even if a doc already exists —
+                    // Rust-side it merges the fresh translation
+                    // into the current subtitle timing.
+                    if (snap.status === "completed") {
+                      void get()
+                        .rebuildSubtitles(snap.projectId)
+                        .catch((err) =>
+                          console.warn(
+                            "auto-rebuild subtitles after translate failed",
+                            err,
+                          ),
+                        );
+                    }
                   }
                   if (snap.stage === "tts") {
                     void get().loadTtsManifest(snap.projectId);
@@ -972,6 +1001,32 @@ export const useAppStore = create<AppState>((set, get) => ({
     } finally {
       set({ ttsVoicesLoading: false });
     }
+  },
+
+  refreshTtsRecommendedVoices: async () => {
+    set({ ttsRecommendedLoading: true });
+    try {
+      const presets = await api.listRecommendedTtsVoices();
+      set({ ttsRecommendedVoices: presets });
+      return presets;
+    } catch (err) {
+      console.warn("tts recommended voices refresh failed", err);
+      return [];
+    } finally {
+      set({ ttsRecommendedLoading: false });
+    }
+  },
+
+  downloadTtsVoice: async (preset) => {
+    // Phase 12 — same job-registration pattern as
+    // `downloadWhisperModel` and `downloadTranslationModel`. Seed
+    // both maps so the progress bar shows immediately without
+    // waiting for the first progress tick from the worker.
+    const snap = await api.downloadTtsVoice(preset);
+    set((state) => ({
+      jobsById: { ...state.jobsById, [snap.id]: snap },
+      jobProgress: { ...state.jobProgress, [snap.id]: 0 },
+    }));
   },
 
   loadTtsManifest: async (projectId) => {

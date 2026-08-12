@@ -38,8 +38,8 @@ use super::cache::{voices_dir, TtsCacheFile, VOICES_RELATIVE, VOICES_SUBDIR};
 use super::errors::TtsError;
 use super::models::{
     build_segment_cache_key, entry_matches, text_hash, voice_file_relative, GenerateMode,
-    GenerateRequest, PreviewResult, TtsEnv, TtsGenerateStart, TtsManifest, TtsSegmentEntry,
-    TtsSettings, TtsSummary, VoiceInfo,
+    GenerateRequest, PreviewResult, RecommendedVoicePreset, TtsEnv, TtsGenerateStart, TtsManifest,
+    TtsSegmentEntry, TtsSettings, TtsSummary, VoiceInfo,
 };
 
 const PROGRESS_EMIT_MIN_INTERVAL_MS: u128 = 100;
@@ -147,6 +147,157 @@ impl TtsService {
             TtsError::Worker(crate::worker::WorkerError::Protocol { msg: e.to_string() })
         })?;
         Ok(r.voices)
+    }
+
+    /// Phase 12 — curated presets the app can auto-download.
+    /// Sourced from the Python worker (single source of truth in
+    /// ``tts/registry.py::_RECOMMENDED_VOICES``) so the two sides
+    /// can never disagree on what's installable.
+    pub async fn list_recommended_voices(
+        self: &Arc<Self>,
+    ) -> Result<Vec<RecommendedVoicePreset>, TtsError> {
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            presets: Vec<RecommendedVoicePreset>,
+        }
+        let v = self
+            .worker
+            .request_no_timeout_with_id(
+                &self.worker.new_request_id(),
+                "tts.list_recommended",
+                json!({}),
+            )
+            .await
+            .map_err(TtsError::Worker)?;
+        let r: Resp = serde_json::from_value(v).map_err(|e| {
+            TtsError::Worker(crate::worker::WorkerError::Protocol { msg: e.to_string() })
+        })?;
+        Ok(r.presets)
+    }
+
+    // ---------------------------------------------------------- download voice
+
+    /// Phase 12 — pull a curated Piper voice (`.onnx` + `.onnx.json`)
+    /// from HuggingFace into `<models>/tts/piper/<voice_id>/`.
+    /// Mirrors `stt::download_model` / `translation::download_model`
+    /// down to the FK-safe in-memory-only job (`project_id: ""`).
+    pub async fn download_voice(
+        self: &Arc<Self>,
+        preset: String,
+    ) -> Result<JobSnapshot, TtsError> {
+        let job_id = format!("job_{}", Uuid::new_v4().simple());
+        let handle = self
+            .jobs
+            .register(job_id.clone(), String::new(), JobStage::Tts)?;
+        let now = Utc::now();
+        let snap = JobSnapshot {
+            id: job_id.clone(),
+            project_id: String::new(),
+            stage: JobStage::Tts,
+            status: JobStatus::Running,
+            progress: 0.0,
+            error_code: None,
+            error_message: None,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: None,
+        };
+        // In-memory only — see comment at top of `finalize_success`.
+        self.emit_update(&snap);
+
+        let request_id = self.worker.new_request_id();
+        let cancel = handle.cancel.clone();
+        let request_id_for_cancel = request_id.clone();
+        let worker_for_cancel = self.worker.clone();
+        tokio::spawn(async move {
+            cancel.wait().await;
+            let _ = worker_for_cancel
+                .cancel_request(&request_id_for_cancel)
+                .await;
+        });
+
+        let app_for_prog = self.app.clone();
+        let job_for_prog = job_id.clone();
+        let request_id_for_prog = request_id.clone();
+        let sub = self.worker.subscribe(
+            "tts.download_progress",
+            Arc::new(move |_, params| {
+                let Some(target) = params.get("requestId").and_then(|v| v.as_str()) else {
+                    return;
+                };
+                if target != request_id_for_prog {
+                    return;
+                }
+                let frac = params
+                    .get("fraction")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+                let evt = JobProgressEvent {
+                    id: job_for_prog.clone(),
+                    project_id: String::new(),
+                    stage: JobStage::Tts,
+                    progress: frac,
+                };
+                let _ = app_for_prog.emit("job://progress", evt);
+            }),
+        );
+
+        let this = self.clone();
+        let jobs_for_dereg = self.jobs.clone();
+        let job_id_bg = job_id.clone();
+        tokio::spawn(async move {
+            let result = this
+                .worker
+                .request_no_timeout_with_id(
+                    &request_id,
+                    "tts.download_voice",
+                    json!({ "preset": preset }),
+                )
+                .await;
+            this.worker.unsubscribe(sub);
+            this.finalize_download(&job_id_bg, result).await;
+            jobs_for_dereg.deregister(&job_id_bg);
+        });
+
+        Ok(snap)
+    }
+
+    async fn finalize_download(
+        self: Arc<Self>,
+        job_id: &str,
+        result: Result<Value, crate::worker::WorkerError>,
+    ) {
+        match result {
+            Ok(_) => self.finalize_success(job_id, "", JobStage::Tts).await,
+            Err(err) => match err {
+                crate::worker::WorkerError::Rpc(rpc) => {
+                    let t_err = TtsError::from_rpc(rpc);
+                    if matches!(t_err, TtsError::Cancelled) {
+                        self.finalize_cancel(job_id, "", JobStage::Tts).await;
+                    } else {
+                        let code = tts_err_code(&t_err);
+                        self.finalize_failure(
+                            job_id,
+                            "",
+                            JobStage::Tts,
+                            code,
+                            &t_err.to_string(),
+                        )
+                        .await;
+                    }
+                }
+                _ => {
+                    self.finalize_failure(
+                        job_id,
+                        "",
+                        JobStage::Tts,
+                        "TTS_WORKER_ERROR",
+                        &err.to_string(),
+                    )
+                    .await;
+                }
+            },
+        }
     }
 
     pub async fn get_manifest(
@@ -683,13 +834,20 @@ impl TtsService {
     // ---------------------------------------------------- job finalization
 
     async fn finalize_success(&self, job_id: &str, project_id: &str, stage: JobStage) {
-        let db = self.db.clone();
-        let jid = job_id.to_string();
-        let _ = db
-            .run(move |d| {
-                JobsRepo::update_status(d, &jid, JobStatus::Completed, Some(1.0), None, None)
-            })
-            .await;
+        // Phase 12 bug-fix (mirrors stt/translation) — download
+        // jobs live in-memory only (no `projectId`) because
+        // `jobs.project_id` has a NOT NULL FK to `projects(id)`.
+        // Skipping the DB update in that case avoids a FK-constraint
+        // panic while still emitting the terminal `job://update`.
+        if !project_id.is_empty() {
+            let db = self.db.clone();
+            let jid = job_id.to_string();
+            let _ = db
+                .run(move |d| {
+                    JobsRepo::update_status(d, &jid, JobStatus::Completed, Some(1.0), None, None)
+                })
+                .await;
+        }
         self.emit_terminal(TerminalEvent {
             job_id: job_id.into(),
             project_id: project_id.into(),
@@ -702,20 +860,23 @@ impl TtsService {
     }
 
     async fn finalize_cancel(&self, job_id: &str, project_id: &str, stage: JobStage) {
-        let db = self.db.clone();
-        let jid = job_id.to_string();
-        let _ = db
-            .run(move |d| {
-                JobsRepo::update_status(
-                    d,
-                    &jid,
-                    JobStatus::Cancelled,
-                    None,
-                    Some("CANCELLED"),
-                    Some("user cancelled"),
-                )
-            })
-            .await;
+        // Phase 12 bug-fix — see `finalize_success`.
+        if !project_id.is_empty() {
+            let db = self.db.clone();
+            let jid = job_id.to_string();
+            let _ = db
+                .run(move |d| {
+                    JobsRepo::update_status(
+                        d,
+                        &jid,
+                        JobStatus::Cancelled,
+                        None,
+                        Some("CANCELLED"),
+                        Some("user cancelled"),
+                    )
+                })
+                .await;
+        }
         self.emit_terminal(TerminalEvent {
             job_id: job_id.into(),
             project_id: project_id.into(),
@@ -735,22 +896,25 @@ impl TtsService {
         code: &str,
         message: &str,
     ) {
-        let db = self.db.clone();
-        let jid = job_id.to_string();
-        let code_owned = code.to_string();
-        let msg_owned = message.to_string();
-        let _ = db
-            .run(move |d| {
-                JobsRepo::update_status(
-                    d,
-                    &jid,
-                    JobStatus::Failed,
-                    None,
-                    Some(&code_owned),
-                    Some(&msg_owned),
-                )
-            })
-            .await;
+        // Phase 12 bug-fix — see `finalize_success`.
+        if !project_id.is_empty() {
+            let db = self.db.clone();
+            let jid = job_id.to_string();
+            let code_owned = code.to_string();
+            let msg_owned = message.to_string();
+            let _ = db
+                .run(move |d| {
+                    JobsRepo::update_status(
+                        d,
+                        &jid,
+                        JobStatus::Failed,
+                        None,
+                        Some(&code_owned),
+                        Some(&msg_owned),
+                    )
+                })
+                .await;
+        }
         self.emit_terminal(TerminalEvent {
             job_id: job_id.into(),
             project_id: project_id.into(),
@@ -1073,6 +1237,8 @@ fn tts_err_code(err: &TtsError) -> &'static str {
         TtsError::WorkerCrash => "TTS_WORKER_CRASH",
         TtsError::Cancelled => "TTS_CANCELLED",
         TtsError::SegmentNotFound { .. } => "TTS_SEGMENT_NOT_FOUND",
+        TtsError::UnknownPreset { .. } => "TTS_UNKNOWN_PRESET",
+        TtsError::DownloadFailed { .. } => "TTS_DOWNLOAD_FAILED",
         TtsError::Worker(_) => "TTS_WORKER_ERROR",
         TtsError::Registry(_) => "TTS_REGISTRY",
         TtsError::Db(_) => "TTS_DB",

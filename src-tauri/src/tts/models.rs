@@ -94,6 +94,24 @@ pub struct TtsEnv {
 
 // -------------------------------------------------------------- voices
 
+/// Phase 12 — one entry from the curated list of TTS voice
+/// presets the app can auto-download. Owned by the Python worker
+/// (`tts/registry.py::_RECOMMENDED_VOICES`); the wire shape here
+/// is fixed by `#[serde(rename_all = "camelCase")]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecommendedVoicePreset {
+    pub preset: String,
+    pub engine: String,
+    pub voice_id: String,
+    pub language: String,
+    pub target_languages: Vec<String>,
+    pub quality: String,
+    pub approx_size_bytes: u64,
+    pub label: String,
+    pub is_default: bool,
+}
+
 /// One installed voice model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

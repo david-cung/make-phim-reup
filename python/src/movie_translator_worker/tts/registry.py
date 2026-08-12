@@ -213,3 +213,95 @@ def supported_engines() -> list[dict[str, Any]]:
             "supportedSettings": ["speed"],
         }
     ]
+
+
+# --------------------------------------------------------- recommended voices
+#
+# Curated list of Piper voices the app can auto-download when the
+# user has none installed. Mirrors the Whisper (`stt/registry.py`)
+# and translation (`translation/registry.py`) presets — the goal is
+# that clicking "Generate all" for the very first time Just Works
+# without the user hunting for a `.onnx` file.
+#
+# All entries live in the ``rhasspy/piper-voices`` HuggingFace repo,
+# under the path convention::
+#
+#     <lang>/<lang_LOCALE>/<name>/<quality>/<file>.onnx
+#     <lang>/<lang_LOCALE>/<name>/<quality>/<file>.onnx.json
+#
+# ``target_languages`` is the set of app-level target language codes
+# (see ``TRANSLATION_LANGUAGES`` on the frontend) this voice covers.
+# The frontend uses it to pick a default voice for the project's
+# target language when auto-downloading.
+
+_PIPER_HF_REPO = "rhasspy/piper-voices"
+
+_RECOMMENDED_VOICES: dict[str, dict[str, Any]] = {
+    "vi_VN-vais1000-medium": {
+        "engine": "piper",
+        "voice_id": "vi_VN-vais1000-medium",
+        "language": "vi",
+        "target_languages": ["vi"],
+        "quality": "medium",
+        "approx_size_bytes": 63_000_000,
+        "label": "Piper — Vietnamese (vais1000, medium, ~63 MB)",
+        "repo": _PIPER_HF_REPO,
+        "hf_dir": "vi/vi_VN/vais1000/medium",
+    },
+    "en_US-libritts_r-medium": {
+        "engine": "piper",
+        "voice_id": "en_US-libritts_r-medium",
+        "language": "en",
+        "target_languages": ["en"],
+        "quality": "medium",
+        "approx_size_bytes": 63_000_000,
+        "label": "Piper — English US (libritts_r, medium, ~63 MB)",
+        "repo": _PIPER_HF_REPO,
+        "hf_dir": "en/en_US/libritts_r/medium",
+    },
+    "zh_CN-huayan-medium": {
+        "engine": "piper",
+        "voice_id": "zh_CN-huayan-medium",
+        "language": "zh",
+        "target_languages": ["zh", "yue"],
+        "quality": "medium",
+        "approx_size_bytes": 63_000_000,
+        "label": "Piper — Chinese (huayan, medium, ~63 MB)",
+        "repo": _PIPER_HF_REPO,
+        "hf_dir": "zh/zh_CN/huayan/medium",
+    },
+}
+
+# Voice used as fallback when the project's target language doesn't
+# have a preset — Vietnamese is the app's primary target locale.
+DEFAULT_RECOMMENDED_VOICE_PRESET = "vi_VN-vais1000-medium"
+
+
+def recommended_voices() -> list[dict[str, Any]]:
+    """Every preset the app knows how to auto-download.
+
+    Wire shape (camelCase, matches Rust
+    ``tts::RecommendedVoicePreset``): ``preset``, ``engine``,
+    ``voiceId``, ``language``, ``targetLanguages``, ``quality``,
+    ``approxSizeBytes``, ``label``, ``isDefault``.
+    """
+    out: list[dict[str, Any]] = []
+    for preset, meta in _RECOMMENDED_VOICES.items():
+        out.append(
+            {
+                "preset": preset,
+                "engine": meta["engine"],
+                "voiceId": meta["voice_id"],
+                "language": meta["language"],
+                "targetLanguages": list(meta["target_languages"]),
+                "quality": meta["quality"],
+                "approxSizeBytes": int(meta["approx_size_bytes"]),
+                "label": meta["label"],
+                "isDefault": preset == DEFAULT_RECOMMENDED_VOICE_PRESET,
+            }
+        )
+    return out
+
+
+def recommended_voice_meta(preset: str) -> Optional[dict[str, Any]]:
+    return _RECOMMENDED_VOICES.get(preset)

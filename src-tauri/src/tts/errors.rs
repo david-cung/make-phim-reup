@@ -46,6 +46,12 @@ pub enum TtsError {
     #[error("segment {segment_id} not found in subtitles")]
     SegmentNotFound { segment_id: u32 },
 
+    #[error("unknown recommended TTS voice preset: {preset:?}")]
+    UnknownPreset { preset: String },
+
+    #[error("failed to download TTS voice: {reason}")]
+    DownloadFailed { reason: String },
+
     #[error("worker error: {0}")]
     Worker(#[from] WorkerError),
 
@@ -87,6 +93,12 @@ impl TtsError {
             "TTS_OUT_OF_MEMORY" => Self::OutOfMemory,
             "TTS_DISK_FULL" => Self::DiskFull,
             "TTS_WORKER_CRASH" => Self::WorkerCrash,
+            "TTS_UNKNOWN_PRESET" => Self::UnknownPreset {
+                preset: extract_str(&err, "preset").unwrap_or_default(),
+            },
+            "TTS_DOWNLOAD_FAILED" => Self::DownloadFailed {
+                reason: err.message.clone(),
+            },
             _ => Self::Worker(WorkerError::Rpc(err)),
         }
     }
@@ -98,4 +110,46 @@ fn extract_str(err: &RpcError, key: &str) -> Option<String> {
         .and_then(|v| v.get(key))
         .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rpc(code: &str, msg: &str, data: Option<serde_json::Value>) -> RpcError {
+        RpcError {
+            code: code.into(),
+            message: msg.into(),
+            data,
+        }
+    }
+
+    #[test]
+    fn maps_unknown_preset_with_data() {
+        let err = TtsError::from_rpc(rpc(
+            "TTS_UNKNOWN_PRESET",
+            "no such voice",
+            Some(json!({"preset": "vi_VN-nope-low"})),
+        ));
+        match err {
+            TtsError::UnknownPreset { preset } => assert_eq!(preset, "vi_VN-nope-low"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn maps_download_failed_preserves_message() {
+        let err = TtsError::from_rpc(rpc(
+            "TTS_DOWNLOAD_FAILED",
+            "connection reset by peer",
+            None,
+        ));
+        match err {
+            TtsError::DownloadFailed { reason } => {
+                assert_eq!(reason, "connection reset by peer")
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }

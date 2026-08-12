@@ -100,7 +100,181 @@ def tts_list_voices(_params: dict[str, Any]) -> dict[str, Any]:
     return {"voices": [v.to_dict() for v in voices]}
 
 
+def tts_list_recommended(_params: dict[str, Any]) -> dict[str, Any]:
+    """Phase 12 — voices the app can auto-download when the user
+    hasn't installed any. Mirrors ``stt.list_models`` /
+    ``translate.list_recommended``.
+    """
+    return {"presets": registry.recommended_voices()}
+
+
 # --------------------------------------------------------------- async methods
+
+
+def tts_download_voice(
+    params: dict[str, Any], ctx: HandlerContext
+) -> dict[str, Any]:
+    """Phase 12 — pull a Piper voice pair (`.onnx` + `.onnx.json`)
+    from HuggingFace into ``<models>/tts/piper/<voice_id>/``.
+
+    Emits ``tts.download_progress`` keyed on the request id so the
+    Rust host can drive a progress bar just like it does for STT
+    and translation model downloads. Idempotent: if both files
+    already exist locally, returns a completed payload without
+    hitting the network.
+    """
+    preset = _require_str(params, "preset")
+    meta = registry.recommended_voice_meta(preset)
+    if meta is None:
+        raise RpcError(
+            RpcErrorCode.TTS_UNKNOWN_PRESET,
+            f"unknown TTS voice preset: {preset}",
+        )
+    if str(meta["engine"]) != "piper":
+        # Only Piper is wired up so far. Adding another engine here
+        # is a matter of extending the branch — the download flow
+        # itself is engine-agnostic.
+        raise RpcError(
+            RpcErrorCode.TTS_UNKNOWN_PRESET,
+            f"auto-download is only supported for Piper voices right now (got {meta['engine']!r})",
+        )
+    voice_id = str(meta["voice_id"])
+    repo = str(meta["repo"])
+    hf_dir = str(meta["hf_dir"]).strip("/")
+    onnx_name = f"{voice_id}.onnx"
+    json_name = f"{voice_id}.onnx.json"
+    onnx_hf_path = f"{hf_dir}/{onnx_name}"
+    json_hf_path = f"{hf_dir}/{json_name}"
+
+    root = _models_root()
+    piper_root = registry.engine_root(root, "piper")
+    voice_dir = piper_root / voice_id
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    onnx_dest = voice_dir / onnx_name
+    json_dest = voice_dir / json_name
+
+    def _progress(fraction: float, stage: str) -> None:
+        ctx.emit_progress(
+            "tts.download_progress",
+            {
+                "fraction": max(0.0, min(1.0, float(fraction))),
+                "stage": stage,
+            },
+        )
+
+    if (
+        onnx_dest.is_file()
+        and onnx_dest.stat().st_size > 0
+        and json_dest.is_file()
+        and json_dest.stat().st_size > 0
+    ):
+        _progress(1.0, "already_installed")
+        return {
+            "ok": True,
+            "preset": preset,
+            "voiceId": voice_id,
+            "engine": "piper",
+            "modelPath": str(onnx_dest),
+            "configPath": str(json_dest),
+            "sizeBytes": onnx_dest.stat().st_size,
+            "alreadyInstalled": True,
+        }
+
+    _progress(0.0, "starting")
+
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore[import-not-found]
+    except ImportError as e:
+        raise RpcError(
+            RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
+            "huggingface_hub is not installed; add the [tts] extra to the worker environment",
+        ) from e
+
+    try:
+        if ctx.cancelled():
+            raise RpcError(RpcErrorCode.CANCELLED, "download cancelled by user")
+        # Config first — it's ~1 KB and gives us cheap early feedback
+        # if the repo path is wrong (misspelled voice name).
+        _progress(0.05, "downloading_config")
+        cfg_path = Path(
+            hf_hub_download(
+                repo_id=repo,
+                filename=json_hf_path,
+                local_dir=str(voice_dir),
+            )
+        )
+        _move_into_place(cfg_path, json_dest)
+
+        if ctx.cancelled():
+            raise RpcError(RpcErrorCode.CANCELLED, "download cancelled by user")
+
+        _progress(0.15, "downloading_model")
+        model_path = Path(
+            hf_hub_download(
+                repo_id=repo,
+                filename=onnx_hf_path,
+                local_dir=str(voice_dir),
+            )
+        )
+        _move_into_place(model_path, onnx_dest)
+
+        if ctx.cancelled():
+            raise RpcError(RpcErrorCode.CANCELLED, "download cancelled by user")
+
+        _progress(1.0, "downloaded")
+    except RpcError:
+        _cleanup_voice(voice_dir, onnx_dest, json_dest)
+        raise
+    except Exception as e:
+        _cleanup_voice(voice_dir, onnx_dest, json_dest)
+        raise RpcError(
+            RpcErrorCode.TTS_DOWNLOAD_FAILED,
+            f"failed to download voice {voice_id!r} from {repo!r}: {e}",
+        ) from e
+
+    return {
+        "ok": True,
+        "preset": preset,
+        "voiceId": voice_id,
+        "engine": "piper",
+        "modelPath": str(onnx_dest),
+        "configPath": str(json_dest),
+        "sizeBytes": onnx_dest.stat().st_size if onnx_dest.is_file() else 0,
+        "alreadyInstalled": False,
+    }
+
+
+def _move_into_place(src: Path, dest: Path) -> None:
+    """``hf_hub_download`` with ``local_dir`` may write to a nested
+    subpath (mirroring the repo structure). We flatten by moving
+    into the flat ``voice_dir/<file>`` layout the registry expects.
+    """
+    if src == dest:
+        return
+    if dest.exists():
+        dest.unlink()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dest)
+
+
+def _cleanup_voice(voice_dir: Path, *files: Path) -> None:
+    """Remove zero-byte / half-written outputs so a retry starts
+    fresh instead of picking up a broken half-file. Only removes
+    what we were about to write — never touches unrelated content
+    already in the voice directory.
+    """
+    for f in files:
+        try:
+            if f.exists() and f.stat().st_size == 0:
+                f.unlink()
+        except OSError:
+            pass
+    try:
+        # Only nuke the dir if we ended up creating it empty.
+        if voice_dir.is_dir() and not any(voice_dir.iterdir()):
+            voice_dir.rmdir()
+    except OSError:
+        pass
 
 
 def tts_synthesize_one(
@@ -332,9 +506,11 @@ def tts_unload(_params: dict[str, Any]) -> dict[str, Any]:
 def install(dispatcher) -> None:
     dispatcher.register("tts.env", tts_env)
     dispatcher.register("tts.list_voices", tts_list_voices)
+    dispatcher.register("tts.list_recommended", tts_list_recommended)
     dispatcher.register("tts.unload", tts_unload)
     dispatcher.register_async("tts.synthesize_one", tts_synthesize_one)
     dispatcher.register_async("tts.synthesize_batch", tts_synthesize_batch)
+    dispatcher.register_async("tts.download_voice", tts_download_voice)
 
 
 # ------------------------------------------------------------------ helpers

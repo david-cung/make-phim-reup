@@ -740,6 +740,42 @@ pub async fn list_tts_voices(state: State<'_, AppState>) -> Result<Vec<VoiceInfo
 }
 
 #[tauri::command]
+pub async fn list_recommended_tts_voices(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::tts::RecommendedVoicePreset>, AppError> {
+    Ok(state.tts.list_recommended_voices().await?)
+}
+
+#[tauri::command]
+pub async fn download_tts_voice(
+    state: State<'_, AppState>,
+    preset: String,
+) -> Result<JobSnapshot, AppError> {
+    tracing::info!(preset = %preset, "download_tts_voice requested");
+    if state.settings.snapshot().offline_mode {
+        tracing::info!(
+            preset = %preset,
+            "download_tts_voice refused: offline mode enabled",
+        );
+        return Err(AppError::from(ModelManagerError::NetworkDisabled));
+    }
+    let result = state.tts.download_voice(preset.clone()).await;
+    match &result {
+        Ok(snap) => tracing::info!(
+            preset = %preset,
+            job_id = %snap.id,
+            "download_tts_voice started",
+        ),
+        Err(err) => tracing::warn!(
+            preset = %preset,
+            error = %err,
+            "download_tts_voice failed to start",
+        ),
+    }
+    Ok(result?)
+}
+
+#[tauri::command]
 pub async fn get_project_tts_summary(
     state: State<'_, AppState>,
     project_id: String,

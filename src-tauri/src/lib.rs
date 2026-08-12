@@ -125,6 +125,8 @@ pub fn run() {
             // Phase 6
             commands::get_tts_env,
             commands::list_tts_voices,
+            commands::list_recommended_tts_voices,
+            commands::download_tts_voice,
             commands::get_project_tts_summary,
             commands::get_project_tts_manifest,
             commands::preview_tts_segment,

@@ -467,6 +467,20 @@ impl From<TtsError> for AppError {
             TtsError::WorkerCrash => ("TTS_WORKER_CRASH", true, None),
             TtsError::Cancelled => ("TTS_CANCELLED", true, None),
             TtsError::SegmentNotFound { .. } => ("TTS_SEGMENT_NOT_FOUND", true, None),
+            TtsError::UnknownPreset { .. } => (
+                "TTS_UNKNOWN_PRESET",
+                true,
+                Some(
+                    "The app tried to auto-download an unrecognised voice preset. Update the app or drop a Piper voice into <models>/tts/piper/ manually.",
+                ),
+            ),
+            TtsError::DownloadFailed { .. } => (
+                "TTS_DOWNLOAD_FAILED",
+                true,
+                Some(
+                    "Check your network connection and disk space, then retry. Rate-limit errors from HuggingFace usually clear within a few minutes.",
+                ),
+            ),
             TtsError::Worker(_) => ("TTS_WORKER_ERROR", true, None),
             TtsError::Registry(_) => ("TTS_REGISTRY", true, None),
             TtsError::Db(_) => ("TTS_DB", true, None),

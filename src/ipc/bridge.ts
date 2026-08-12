@@ -74,6 +74,7 @@ import {
   type TtsEnv,
   type TtsGenerateStart,
   type TtsManifest,
+  type TtsRecommendedVoicePreset,
   type TtsSegmentCompletedEvent,
   type TtsSettings,
   type TtsSummary,
@@ -238,6 +239,15 @@ export const api = {
   // Phase 6 (Local TTS / AI dubbing)
   getTtsEnv: () => invoke<TtsEnv>("get_tts_env"),
   listTtsVoices: () => invoke<VoiceInfo[]>("list_tts_voices"),
+  // Phase 12 — TTS voice auto-download, mirrors the STT +
+  // translation download flow. Presets live in the worker at
+  // ``tts/registry.py::_RECOMMENDED_VOICES``; the download itself
+  // returns a job snapshot and streams progress via
+  // ``job://update`` + ``job://progress``.
+  listRecommendedTtsVoices: () =>
+    invoke<TtsRecommendedVoicePreset[]>("list_recommended_tts_voices"),
+  downloadTtsVoice: (preset: string) =>
+    invoke<JobSnapshot>("download_tts_voice", { preset }),
   getProjectTtsSummary: (
     projectId: string,
     engine: string,

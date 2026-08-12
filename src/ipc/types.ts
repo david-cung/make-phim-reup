@@ -640,6 +640,24 @@ export interface VoiceInfo {
   supportedSettings: string[];
 }
 
+// Phase 12 — one entry from the app's curated Piper voice
+// auto-download list. Source of truth is
+// ``tts/registry.py::_RECOMMENDED_VOICES``; Rust mirrors this shape
+// via ``tts::models::RecommendedVoicePreset``. ``targetLanguages``
+// lets the frontend pick a voice matching the project's target
+// translation language when auto-downloading.
+export interface TtsRecommendedVoicePreset {
+  preset: string;
+  engine: string;
+  voiceId: string;
+  language: string;
+  targetLanguages: string[];
+  quality: string;
+  approxSizeBytes: number;
+  label: string;
+  isDefault: boolean;
+}
+
 export interface TtsSegmentEntry {
   segmentId: number;
   engine: string;

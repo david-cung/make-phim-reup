@@ -21,7 +21,7 @@ pub use cache::{TtsCacheFile, VOICES_FILENAME, VOICES_RELATIVE, VOICES_SUBDIR};
 pub use errors::TtsError;
 pub use models::{
     build_segment_cache_key, text_hash, GenerateMode, GenerateRequest, PreviewResult,
-    TtsEngineInfo, TtsEnv, TtsGenerateStart, TtsManifest, TtsSegmentEntry, TtsSettings, TtsSummary,
-    VoiceInfo, TTS_CACHE_SCHEMA_VERSION,
+    RecommendedVoicePreset, TtsEngineInfo, TtsEnv, TtsGenerateStart, TtsManifest, TtsSegmentEntry,
+    TtsSettings, TtsSummary, VoiceInfo, TTS_CACHE_SCHEMA_VERSION,
 };
 pub use service::TtsService;
