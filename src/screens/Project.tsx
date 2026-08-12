@@ -11,6 +11,7 @@ import { useAppStore } from "@/state/store";
 import { TopBar } from "../components/TopBar";
 import { YouTubePanel } from "../components/YouTubePanel";
 import {
+  IconClose,
   IconExport,
   IconFolder,
   IconLayers,
@@ -111,14 +112,20 @@ function findLatestDownloadJobId(
   return pool[0]?.id ?? null;
 }
 
-// Phase 12 UX — resolve when the given job reaches a terminal
-// state (`completed` | `failed` | `cancelled`). Uses the zustand
-// subscription so we don't spin on `setInterval`. A 30-minute cap
-// keeps us from leaking a listener if the worker dies silently
-// mid-download.
+// Phase 12 UX — resolve when the given job reaches a terminal state
+// (`completed` | `failed` | `cancelled`). Uses the zustand subscription
+// so we don't spin on `setInterval`.
+//
+// The guard is an inactivity watchdog, not a wall-clock deadline: a
+// total cap can't distinguish "still working" from "dead", and the
+// honest upper bound is hours — translating a feature film with a
+// CPU-bound quantised LLM, or rendering a long export, legitimately
+// runs that long. A worker that dies silently, by contrast, stops
+// reporting immediately. So we only give up after a long stretch with
+// no progress event and no status change at all.
 function waitForJobTerminal(
   jobId: string,
-  timeoutMs = 30 * 60_000,
+  inactivityMs = 15 * 60_000,
 ): Promise<JobSnapshot> {
   return new Promise((resolve, reject) => {
     const initial = useAppStore.getState().jobsById[jobId];
@@ -126,18 +133,43 @@ function waitForJobTerminal(
       resolve(initial);
       return;
     }
-    const timer = setTimeout(() => {
-      unsub();
-      reject(new Error("Timed out waiting for job to finish."));
-    }, timeoutMs);
+
+    let timer: ReturnType<typeof setTimeout>;
+    let lastStatus = initial?.status;
+    let lastProgress = useAppStore.getState().jobProgress[jobId];
+
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        unsub();
+        reject(
+          new Error(
+            `No progress from this job for ${Math.round(
+              inactivityMs / 60_000,
+            )} minutes — the worker may have stopped. Check the logs, then try again.`,
+          ),
+        );
+      }, inactivityMs);
+    };
+
     const unsub = useAppStore.subscribe((state) => {
       const snap = state.jobsById[jobId];
-      if (snap && isTerminalStatus(snap.status)) {
+      if (!snap) return;
+      if (isTerminalStatus(snap.status)) {
         clearTimeout(timer);
         unsub();
         resolve(snap);
+        return;
+      }
+      const progress = state.jobProgress[jobId];
+      if (snap.status !== lastStatus || progress !== lastProgress) {
+        lastStatus = snap.status;
+        lastProgress = progress;
+        arm();
       }
     });
+
+    arm();
   });
 }
 
@@ -271,6 +303,13 @@ export default function ProjectView() {
     }
   }, []);
 
+  // Two kinds of failure, deliberately kept apart. `loadError` means the
+  // project itself couldn't be opened, so there is no editor to show.
+  // `error` is an operational failure from one stage — the editor stays
+  // up and reports it inline, because replacing the whole workspace
+  // (losing the video, the subtitles, the timeline) over a single failed
+  // render is far more disruptive than the failure itself.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [sttOptions, setSttOptions] = useState<SttOptions>(() =>
@@ -286,8 +325,9 @@ export default function ProjectView() {
 
   useEffect(() => {
     if (!id) return;
+    setLoadError(null);
     setError(null);
-    openProject(id).catch((e) => setError(formatError(e)));
+    openProject(id).catch((e) => setLoadError(formatError(e)));
   }, [id, openProject]);
 
   useEffect(() => {
@@ -688,14 +728,14 @@ export default function ProjectView() {
     else el.pause();
   };
 
-  if (error) {
+  if (loadError) {
     return (
       <div className="app-shell">
         <TopBar showBackToDashboard showDefaultTools={false} />
         <main className="app-body plain">
           <div className="error-panel">
             <h2>Cannot open project</h2>
-            <pre>{error}</pre>
+            <pre>{loadError}</pre>
             <Link to="/" className="btn" style={{ marginTop: 12 }}>
               Back to dashboard
             </Link>
@@ -1721,6 +1761,19 @@ export default function ProjectView() {
         </aside>
 
         <div className="workspace">
+          {error && (
+            <div className="banner banner--error workspace-error" role="alert">
+              <span>{error}</span>
+              <button
+                className="btn ghost icon"
+                onClick={() => setError(null)}
+                title="Dismiss"
+                aria-label="Dismiss error"
+              >
+                <IconClose size={14} />
+              </button>
+            </div>
+          )}
           <div className="workspace-center">
             <div className="workspace-split">
               <Stage

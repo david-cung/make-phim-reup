@@ -879,11 +879,21 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 .workspace {
   display: grid;
-  grid-template-rows: 1fr auto;
+  /* Leading row holds the operational-error banner; it collapses to
+     zero height when there is no error to show. */
+  grid-template-rows: auto 1fr auto;
   min-width: 0;
   min-height: 0;
   background: var(--bg-app);
 }
+.workspace-error {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: var(--sp-3) var(--sp-3) 0;
+}
+.workspace-error > span { min-width: 0; overflow-wrap: anywhere; }
 .workspace-center {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
