@@ -988,6 +988,35 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .stage-toolbar .icon-btn:hover:not(:disabled) { background: rgba(255,255,255,.08); }
 .stage-toolbar .icon-btn:disabled { opacity: .4; cursor: not-allowed; }
 
+/* Original / dubbed-result switch, floated over the dark canvas so it
+   doesn't steal vertical space from the picture. */
+.stage-target {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+.stage-target .btn {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: transparent;
+  color: var(--fg-canvas);
+}
+.stage-target .btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+.stage-target .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 /* Unsupported-preview warning stays subtle, placed over the dark canvas */
 .video-unsupported {
   padding: var(--sp-5);

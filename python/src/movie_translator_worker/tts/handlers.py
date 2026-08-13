@@ -363,6 +363,13 @@ def tts_synthesize_batch(
 
     total = len(segments)
     generated = 0
+    log.info(
+        "tts batch start",
+        engine=engine,
+        default_voice=default_voice_id,
+        segments=total,
+        project_root=str(project_dir),
+    )
     ctx.emit_progress(
         "tts.progress",
         {
@@ -440,6 +447,17 @@ def tts_synthesize_batch(
             settings=settings,
         )
         generated += 1
+        log.info(
+            "tts segment complete",
+            segment=seg.id,
+            voice=voice_id,
+            text_chars=len(seg.text),
+            output=str(dst),
+            size_bytes=result.size_bytes,
+            duration_secs=round(result.duration_secs, 3),
+            sample_rate=result.sample_rate,
+            channels=result.channels,
+        )
 
         ctx.emit_progress(
             "tts.segment_completed",
@@ -478,6 +496,12 @@ def tts_synthesize_batch(
             "completedSegments": generated,
             "totalSegments": total,
         },
+    )
+    log.info(
+        "tts batch complete",
+        engine=engine,
+        generated_segments=generated,
+        total_segments=total,
     )
 
     return {

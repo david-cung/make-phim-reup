@@ -169,6 +169,13 @@ def sync_apply_batch(
 
     total = len(segments)
     generated = 0
+    log.info(
+        "sync batch start",
+        segments=total,
+        project_root=str(project_root),
+        output_channels=settings.output_channels,
+        output_sample_rate=settings.output_sample_rate,
+    )
 
     ctx.emit_progress(
         "sync.progress",
@@ -239,6 +246,19 @@ def sync_apply_batch(
             settings=settings,
         )
         generated += 1
+        log.info(
+            "sync segment complete",
+            segment=seg.id,
+            source=str(src),
+            output=str(dst),
+            target_start=round(seg.target_start, 3),
+            target_duration_secs=round(seg.target_duration_secs, 3),
+            final_duration_secs=round(duration, 3),
+            speed_factor=round(plan.speed_factor, 4),
+            size_bytes=size,
+            sample_rate=sr,
+            channels=channels,
+        )
         payload = _entry_payload(
             segment_id=seg.id,
             plan=plan,
@@ -269,6 +289,11 @@ def sync_apply_batch(
             "completedSegments": generated,
             "totalSegments": total,
         },
+    )
+    log.info(
+        "sync batch complete",
+        generated_segments=generated,
+        total_segments=total,
     )
 
     return {

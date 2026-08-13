@@ -536,6 +536,77 @@ export function assetUrl(absolutePath: string): string {
   return convertFileSrc(absolutePath);
 }
 
+/**
+ * Base URL of the loopback media server, cached for the session.
+ *
+ * Held in a module variable because {@link mediaUrl} is called during
+ * render and cannot await anything.
+ */
+let mediaBaseUrl: string | null = null;
+
+async function probeMediaElement(baseUrl: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const audio = new Audio();
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      audio.removeAttribute("src");
+      audio.load();
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("media element probe timed out"));
+    }, 5_000);
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      cleanup();
+      resolve();
+    };
+    audio.onerror = () => {
+      const code = audio.error?.code ?? "unknown";
+      cleanup();
+      reject(new Error(`media element probe failed with code ${code}`));
+    };
+    audio.src = `${baseUrl}&probe=1`;
+    audio.load();
+  });
+}
+
+/**
+ * Fetch the media server's base URL once, at startup.
+ *
+ * The URL carries a token minted per run, so it cannot be hard-coded.
+ * Failure is not fatal: only playback depends on it.
+ */
+export async function initMediaBaseUrl(): Promise<void> {
+  try {
+    mediaBaseUrl = await invoke<string>("get_media_base_url");
+    await probeMediaElement(mediaBaseUrl);
+  } catch (err) {
+    console.error("media preview startup check failed", err);
+  }
+}
+
+/**
+ * Convert an absolute local path into a URL that `<video>` and `<audio>`
+ * can actually play.
+ *
+ * WebKit will not play media from a custom URI scheme — neither Tauri's
+ * `asset:` nor one of our own — because its media pipeline never calls the
+ * scheme handler (webkit.org/b/146351, webkit.org/b/119469). So media goes
+ * over loopback HTTP instead, where ranges and seeking work; see
+ * `src-tauri/src/media_server.rs`. Keep using {@link assetUrl} for images,
+ * which have no such restriction.
+ *
+ * Returns null before the server URL has been fetched, so callers can
+ * hold off rather than render an element that is bound to fail.
+ */
+export function mediaUrl(absolutePath: string): string | null {
+  if (!mediaBaseUrl) return null;
+  return `${mediaBaseUrl}&path=${encodeURIComponent(absolutePath)}`;
+}
+
 /** Native "open subtitle file" dialog. Returns the absolute path or null. */
 export async function pickSubtitleFile(): Promise<string | null> {
   const result = await openDialog({

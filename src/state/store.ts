@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   api,
+  initMediaBaseUrl,
   onJobProgress,
   onJobUpdate,
   onSyncSegmentCompleted,
@@ -475,6 +476,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           api.listProjects(),
           api.workerStatus(),
           api.getFfmpegAvailability(),
+          // Playback needs the loopback media server's URL before any
+          // <video> mounts. It never throws, so it cannot fail bootstrap.
+          initMediaBaseUrl(),
         ]);
 
       const workerUnlisten = await onWorkerStatus((status) =>

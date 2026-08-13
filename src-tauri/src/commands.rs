@@ -51,6 +51,22 @@ use crate::tts::{
 };
 use crate::worker::{EnvInfo, PingResponse, WorkerStatus};
 
+/// Base URL the frontend points `<video>` and `<audio>` at.
+///
+/// Media cannot be played through a custom URI scheme in WebKit, so the
+/// app serves it over loopback HTTP instead; see `crate::media_server`.
+/// The URL carries a per-run token, so it is fetched rather than
+/// hard-coded.
+#[tauri::command]
+pub async fn get_media_base_url() -> Result<String, AppError> {
+    let url = crate::media_server::base_url().ok_or_else(|| {
+        AppError::new("MEDIA_SERVER_UNAVAILABLE", "the local media server is not running")
+            .with_hint("Restart the app. Playback needs it; the rest of the pipeline does not.")
+    })?;
+    tracing::debug!("frontend requested media server URL");
+    Ok(url)
+}
+
 #[tauri::command]
 pub async fn get_app_info(state: State<'_, AppState>) -> Result<AppInfo, AppError> {
     let p = &state.paths;

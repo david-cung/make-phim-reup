@@ -23,6 +23,7 @@ pub mod integrations;
 pub mod jobs;
 pub mod logging;
 pub mod media;
+pub mod media_server;
 pub mod mix;
 pub mod models;
 pub mod paths;
@@ -74,6 +75,18 @@ pub fn run() {
             })
             .map_err(|e| Box::new(std::io::Error::other(e.to_string())))?;
             app.manage(state);
+
+            // The video preview loads over loopback HTTP rather than a
+            // custom URI scheme, which WebKit refuses to play media from.
+            // A failure here costs the preview, not the app, so it is
+            // logged instead of aborting startup.
+            // The URL is deliberately not logged: it carries the access
+            // token. `media_server` logs the port on its own.
+            tauri::async_runtime::block_on(async {
+                if let Err(err) = media_server::start().await {
+                    tracing::error!(%err, "media server failed to start");
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -180,6 +193,7 @@ pub fn run() {
             commands::generate_youtube_thumbnail,
             commands::validate_youtube_thumbnail,
             commands::list_youtube_history,
+            commands::get_media_base_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -361,6 +361,11 @@ impl MixService {
         tracing::info!(
             job = %job_id,
             voices = voices.iter().filter(|v| !v.is_empty).count(),
+            source = %source_video.display(),
+            output = %output_path.display(),
+            original_volume = settings.original_volume,
+            voice_volume = settings.voice_volume,
+            ducking = settings.ducking_enabled,
             "spawning ffmpeg mix"
         );
         tracing::debug!(args = ?cmd.args, "ffmpeg mix argv");
@@ -520,6 +525,16 @@ impl MixService {
                 // Probe the produced WAV for sample rate + channels + duration.
                 let (duration_secs, sample_rate, channels) =
                     probe_wav_metadata(&output_path).unwrap_or((0.0, 44100, 2));
+                tracing::info!(
+                    job = %job_id,
+                    output = %output_path.display(),
+                    size_bytes,
+                    duration_secs,
+                    sample_rate,
+                    channels,
+                    voice_segments = voice_segment_count,
+                    "ffmpeg mix complete"
+                );
                 let entry = MixEntry {
                     cache_key: cache_key.clone(),
                     source_fingerprint: source_fp,

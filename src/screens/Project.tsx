@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  assetUrl,
+  mediaUrl,
   pickMediaFile,
   pickRenderOutputPath,
   pickSubtitleFile,
@@ -710,6 +710,21 @@ export default function ProjectView() {
   // drives the underlying <video> ref directly, so we don't have to
   // fork the existing VideoPreview component.
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Which file the stage plays. The source carries the original
+  // soundtrack and no subtitles, so it can never show whether the dub or
+  // the subtitles came out right — that only lives in the render. Offer
+  // both and default to the finished film once there is one.
+  const [previewTarget, setPreviewTarget] = useState<"source" | "result">(
+    "result",
+  );
+  const renderedPath =
+    media?.render?.status === "ready" ? media.render.absolutePath : null;
+  const showingResult = previewTarget === "result" && !!renderedPath;
+  const previewPath = showingResult
+    ? renderedPath
+    : (project?.sourceMediaPath ?? null);
+
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
@@ -723,7 +738,7 @@ export default function ProjectView() {
       el.removeEventListener("pause", onPause);
       el.removeEventListener("ended", onPause);
     };
-  }, [sourceMediaPath]);
+  }, [previewPath]);
   const togglePlayback = () => {
     const el = videoRef.current;
     if (!el) return;
@@ -1221,8 +1236,9 @@ export default function ProjectView() {
       // Autoplay the resulting file. The <audio> element is rendered
       // by the TTS panel so we just point it at the fresh URL.
       const audio = document.getElementById("tts-preview-audio");
-      if (audio instanceof HTMLAudioElement) {
-        audio.src = assetUrl(result.absolutePath);
+      const url = mediaUrl(result.absolutePath);
+      if (audio instanceof HTMLAudioElement && url) {
+        audio.src = url;
         audio.currentTime = 0;
         void audio.play();
       }
@@ -1396,8 +1412,9 @@ export default function ProjectView() {
     try {
       const result = await previewSync(project.id, segmentId);
       const audio = document.getElementById("sync-preview-audio");
-      if (audio instanceof HTMLAudioElement) {
-        audio.src = assetUrl(result.absolutePath);
+      const url = mediaUrl(result.absolutePath);
+      if (audio instanceof HTMLAudioElement && url) {
+        audio.src = url;
         audio.currentTime = 0;
         void audio.play();
       }
@@ -1478,8 +1495,9 @@ export default function ProjectView() {
 
   const handleMixPlay = () => {
     const audio = document.getElementById("mix-preview-audio");
-    if (audio instanceof HTMLAudioElement && lastMixPreview) {
-      audio.src = assetUrl(lastMixPreview.absolutePath);
+    const url = lastMixPreview ? mediaUrl(lastMixPreview.absolutePath) : null;
+    if (audio instanceof HTMLAudioElement && url) {
+      audio.src = url;
       audio.currentTime = 0;
       void audio.play();
     }
@@ -1507,12 +1525,28 @@ export default function ProjectView() {
     }
   };
 
-  const handleRenderPickOutput = async () => {
+  const chooseRenderOutputPath = async (): Promise<string | null> => {
     const ext: OutputFormat = renderSettings.outputFormat;
     const defaultName = `movie_vi.${ext}`;
-    const path = await pickRenderOutputPath(defaultName, ext);
+    const path = await pickRenderOutputPath(
+      renderSettings.outputPath ?? defaultName,
+      ext,
+    );
     if (path) {
-      setRenderSettings({ outputPath: path });
+      const normalized = path.toLowerCase().endsWith(`.${ext}`)
+        ? path
+        : `${path}.${ext}`;
+      setRenderSettings({ outputPath: normalized });
+      return normalized;
+    }
+    return null;
+  };
+
+  const handleRenderPickOutput = async () => {
+    try {
+      await chooseRenderOutputPath();
+    } catch (e) {
+      setError(formatError(e));
     }
   };
 
@@ -1520,19 +1554,30 @@ export default function ProjectView() {
     setRenderSettings({ outputPath: null });
   };
 
-  // Export CTA in the topbar. It used to only scroll to the render panel,
-  // which read as broken: the label promises a file, and pressing it
-  // while already on the render section did nothing at all. Now it
-  // guarantees the deliverable — reveal the render settings, then drive
-  // whatever stages are still missing through to the final movie.
+  // Export CTA in the topbar. Pick the destination first; cancelling the
+  // native dialog must not start an expensive pipeline. Once confirmed,
+  // store the absolute path in render settings before driving every
+  // missing stage through to the final movie.
   const handleExport = async () => {
-    setSection("render");
-    requestAnimationFrame(() => {
-      document
-        .getElementById("panel-render")
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-    await runPipeline({ upTo: "render" });
+    if (!project.sourceMediaPath) {
+      setError("Import a video before exporting.");
+      setSection("media");
+      return;
+    }
+    try {
+      const outputPath = await chooseRenderOutputPath();
+      if (!outputPath) return;
+
+      setSection("render");
+      requestAnimationFrame(() => {
+        document
+          .getElementById("panel-render")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      await runPipeline({ upTo: "render" });
+    } catch (e) {
+      setError(formatError(e));
+    }
   };
 
   // -----------------------------------------------------------------------
@@ -1758,7 +1803,7 @@ export default function ProjectView() {
             <button
               className="btn"
               onClick={() => void handleExport()}
-              title="Finish any remaining stages and render the movie"
+              title="Choose an output location, then finish and render the movie"
             >
               <IconExport size={14} />
               <span>Export</span>
@@ -1811,23 +1856,47 @@ export default function ProjectView() {
                 onImport={() => void handleImport(false)}
                 busy={busy}
               >
-                {project.sourceMediaPath ? (
+                {previewPath ? (
                   <VideoPreview
-                    absolutePath={project.sourceMediaPath}
-                    metadata={media?.metadata ?? null}
+                    key={previewPath}
+                    absolutePath={previewPath}
+                    metadata={
+                      showingResult ? null : (media?.metadata ?? null)
+                    }
                     videoRef={videoRef}
                     onTimeUpdate={setVideoTime}
-                    overlayText={findCurrentSubtitleText(
-                      subtitleDoc,
-                      videoTime,
-                    )}
+                    // The render already carries its subtitles, burned in
+                    // or otherwise; drawing ours on top would double them.
+                    overlayText={
+                      showingResult
+                        ? null
+                        : findCurrentSubtitleText(subtitleDoc, videoTime)
+                    }
                   />
                 ) : null}
+                {renderedPath && (
+                  <div className="stage-target">
+                    <button
+                      className={`btn tiny ${showingResult ? "" : "primary"}`}
+                      onClick={() => setPreviewTarget("source")}
+                      title="The imported file: original audio, no subtitles"
+                    >
+                      Original
+                    </button>
+                    <button
+                      className={`btn tiny ${showingResult ? "primary" : ""}`}
+                      onClick={() => setPreviewTarget("result")}
+                      title="The rendered film: Vietnamese dub and subtitles"
+                    >
+                      Dubbed result
+                    </button>
+                  </div>
+                )}
                 <StageToolbar
                   time={videoTime}
                   duration={media?.metadata?.durationSecs ?? null}
                   isPlaying={isPlaying}
-                  disabled={!project.sourceMediaPath}
+                  disabled={!previewPath}
                   onToggle={togglePlayback}
                 />
               </Stage>
@@ -3103,9 +3172,44 @@ function VideoPreview(props: {
 }) {
   const { absolutePath, metadata, videoRef, onTimeUpdate, overlayText } =
     props;
-  const src = assetUrl(absolutePath);
+  const src = mediaUrl(absolutePath);
   const compat = detectPreviewCompatibility(absolutePath, metadata);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [runtimeDetail, setRuntimeDetail] = useState<string | null>(null);
+
+  const diagnoseMediaTransport = async () => {
+    if (!src) return;
+    try {
+      const response = await fetch(src, {
+        cache: "no-store",
+        headers: { Range: "bytes=0-1" },
+      });
+      const range = response.headers.get("content-range");
+      const type = response.headers.get("content-type");
+      setRuntimeDetail(
+        response.ok
+          ? `Local media server is reachable (${response.status}, ${type ?? "unknown type"}${range ? `, ${range}` : ""}). The remaining failure is in WebKit's decoder.`
+          : `Local media server returned HTTP ${response.status}.`,
+      );
+    } catch (err) {
+      setRuntimeDetail(
+        `WebKit could not reach the local media server: ${err instanceof Error ? err.message : String(err)}.`,
+      );
+    }
+  };
+
+  // The media server hands out its URL asynchronously at startup, so on
+  // the very first render there is nothing to point at yet.
+  if (!src) {
+    return (
+      <div className="video-wrap">
+        <div className="video-unsupported">
+          <strong>Preview starting…</strong>
+          <p className="small">Connecting to the local media server.</p>
+        </div>
+      </div>
+    );
+  }
 
   // If we already know the file can't render, don't even mount the
   // <video> — WebKit shows a stubborn play-button poster otherwise.
@@ -3128,6 +3232,10 @@ function VideoPreview(props: {
         className="video-preview"
         preload="metadata"
         src={src}
+        onLoadedMetadata={() => {
+          setRuntimeError(null);
+          setRuntimeDetail(null);
+        }}
         onTimeUpdate={(e) =>
           onTimeUpdate((e.target as HTMLVideoElement).currentTime)
         }
@@ -3145,6 +3253,7 @@ function VideoPreview(props: {
                     ? "source not supported — container or codec not supported by webview"
                     : "unknown";
           setRuntimeError(codeText);
+          void diagnoseMediaTransport();
         }}
       >
         Your webview does not support the video element.
@@ -3153,10 +3262,16 @@ function VideoPreview(props: {
         <div className="video-unsupported inline">
           <strong>Preview error:</strong> {runtimeError}
           <div className="small">
-            Convert the file to .mp4 with H.264 + AAC to preview it in
-            the app. Transcribe/translate/render still work on the
-            original file.
+            {metadata?.videoCodec
+              ? `The file reports ${metadata.videoCodec}${
+                  metadata.audioCodec ? ` + ${metadata.audioCodec}` : ""
+                }. `
+              : ""}
+            H.264 video with AAC audio in .mp4 is the combination the
+            webview handles best. Every pipeline stage — transcribe,
+            translate, dub, render — works on the original either way.
           </div>
+          {runtimeDetail && <div className="small">{runtimeDetail}</div>}
         </div>
       )}
       {overlayText && (

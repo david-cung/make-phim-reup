@@ -418,6 +418,10 @@ impl RenderService {
         tracing::info!(
             job = %job_id,
             subtitle_mode = ?settings.subtitle_mode,
+            source = %source_video.display(),
+            mixed_audio = %mixed_audio.display(),
+            output = %output_path.display(),
+            audio_mapping = "1:a:0",
             "spawning ffmpeg render"
         );
         tracing::debug!(args = ?cmd.args, "ffmpeg render argv");
@@ -575,6 +579,16 @@ impl RenderService {
                 got_subtitle: probed.subtitle_stream_count,
             });
         }
+        tracing::info!(
+            job = %job_id,
+            output = %output_path.display(),
+            size_bytes = meta.len(),
+            duration_secs = probed.duration_secs,
+            video_streams = probed.video_stream_count,
+            audio_streams = probed.audio_stream_count,
+            subtitle_streams = probed.subtitle_stream_count,
+            "ffmpeg render complete"
+        );
 
         // Final 100% tick so the UI progress bar always reaches the end.
         let evt = JobProgressEvent {

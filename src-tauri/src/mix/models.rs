@@ -12,7 +12,10 @@ use sha2::{Digest, Sha256};
 use crate::jobs::JobSnapshot;
 use crate::media::SourceFingerprint;
 
-pub const MIX_CACHE_SCHEMA_VERSION: u32 = 2;
+// v3 invalidates mixdowns produced by the old ducking graph, where the
+// voice sidechain output was consumed twice without `asplit`. Those WAVs
+// contain the original soundtrack but no audible generated voice.
+pub const MIX_CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// v1's defaults for the two knobs v2 changed. Kept only so
 /// [`MixManifest::migrated`] can tell an untouched knob from one the user

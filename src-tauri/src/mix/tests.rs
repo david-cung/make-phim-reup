@@ -190,10 +190,11 @@ fn cache_key_changes_with_voice_cache_key() {
 fn cache_key_versioned() {
     // Guard against a silent schema bump — anyone changing the version
     // constant must accept the fallout of invalidating everyone's mix.
-    // v2 rebalanced the defaults and added the output limiter, both of
-    // which change the WAV without changing any user-visible setting, so
-    // the bump is what forces existing mixes to regenerate.
-    assert_eq!(MIX_CACHE_SCHEMA_VERSION, 2);
+    // v2 rebalanced the defaults and added the output limiter. v3 fixes
+    // the voice fan-out in the ducking graph. Both change the WAV without
+    // changing any user-visible setting, so the version bump is what
+    // forces existing mixes to regenerate.
+    assert_eq!(MIX_CACHE_SCHEMA_VERSION, 3);
     let fp = fingerprint();
     let key = build_mix_cache_key(&fp, &[], &MixSettings::default());
     assert!(key.contains("sha256:"));
@@ -227,6 +228,8 @@ fn filter_graph_uses_sidechaincompress_when_ducking_on() {
         },
     );
     assert!(g.contains("sidechaincompress"));
+    assert!(g.contains("[voice_gain]asplit=outputs=2[voice_sc][voice_g]"));
+    assert!(g.contains("[orig_g][voice_sc]sidechaincompress"));
     assert!(g.contains("[orig_ducked][voice_g]amix=inputs=2"));
 }
 
@@ -444,7 +447,7 @@ fn sidechaincompress_params_stay_in_ffmpeg_ranges() {
             .find(|part| part.contains("sidechaincompress"))
             .expect("ducking graph must contain the compressor");
 
-        // The first segment is `[orig_g][voice_g]sidechaincompress=threshold=…`,
+        // The first segment is `[orig_g][voice_sc]sidechaincompress=threshold=…`,
         // so match `name=` anywhere and read the number that follows.
         let param = |name: &str| -> f32 {
             let key = format!("{name}=");

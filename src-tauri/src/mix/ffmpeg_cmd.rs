@@ -12,9 +12,10 @@
 //!   [2:a]adelay=t2|t2,aformat=…                        -> [v2]
 //!    …
 //!   [v1][v2]…amix=inputs=N:normalize=0                 -> [voice]
-//!   [voice]volume=voice_vol                            -> [voice_g]
+//!   [voice]volume=voice_vol                            -> [voice_gain]
+//!   [voice_gain]asplit=2                               -> [voice_sc], [voice_g]
 //!   [orig]volume=orig_vol                              -> [orig_g]
-//!   [orig_g][voice_g]sidechaincompress=threshold=…     -> [orig_ducked]
+//!   [orig_g][voice_sc]sidechaincompress=threshold=…    -> [orig_ducked]
 //!   [orig_ducked][voice_g]amix=inputs=2:normalize=0    -> [mix_sum]
 //!   [mix_sum]alimiter=limit=…:level=disabled           -> [mix]
 //! ```
@@ -162,11 +163,26 @@ pub fn build_filter_graph(voices: &[&MixVoiceInput], settings: &MixSettings) -> 
         vol = s.original_volume
     ));
     if let Some(label) = &voice_label {
-        chain.push(format!(
-            "[{label}]volume={vol:.4}[voice_g]",
-            label = label,
-            vol = s.voice_volume
-        ));
+        if s.ducking_enabled {
+            // A filter output pad can only feed one downstream input.
+            // The voice is needed twice: once as the compressor's
+            // sidechain and once as audible input to the final mix.
+            // Without `asplit`, FFmpeg resolves the second `[voice_g]`
+            // reference incorrectly; the generated voice drives ducking
+            // but never reaches the output.
+            chain.push(format!(
+                "[{label}]volume={vol:.4}[voice_gain]",
+                label = label,
+                vol = s.voice_volume
+            ));
+            chain.push("[voice_gain]asplit=outputs=2[voice_sc][voice_g]".to_string());
+        } else {
+            chain.push(format!(
+                "[{label}]volume={vol:.4}[voice_g]",
+                label = label,
+                vol = s.voice_volume
+            ));
+        }
     }
 
     // Ducking (only meaningful when we actually have voice content).
@@ -178,7 +194,7 @@ pub fn build_filter_graph(voices: &[&MixVoiceInput], settings: &MixSettings) -> 
         // rejected outright ("Value 0.000000 for parameter 'makeup' out
         // of range").
         chain.push(format!(
-            "[orig_g][voice_g]sidechaincompress=threshold={thresh:.4}:ratio={ratio:.4}:attack={attack:.2}:release={release:.2}:makeup=1[orig_ducked]",
+            "[orig_g][voice_sc]sidechaincompress=threshold={thresh:.4}:ratio={ratio:.4}:attack={attack:.2}:release={release:.2}:makeup=1[orig_ducked]",
             thresh = db_to_linear(s.ducking_threshold_db),
             ratio = ratio,
             attack = s.ducking_attack_ms,
