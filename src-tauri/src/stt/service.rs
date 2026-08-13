@@ -661,7 +661,7 @@ pub fn build_cache_key(audio_hash: &str, options: &SttOptions) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let parts = [
-        "v1".to_string(),
+        "v2".to_string(),
         audio_hash.to_string(),
         options.model.clone(),
         options
@@ -676,6 +676,7 @@ pub fn build_cache_key(audio_hash: &str, options: &SttOptions) -> String {
         format!("vad={}", if options.vad_filter { 1 } else { 0 }),
         format!("temp={:.4}", options.temperature),
         format!("prompt={}", options.initial_prompt.as_deref().unwrap_or("")),
+        format!("reseg={}", if options.resegment { 1 } else { 0 }),
     ];
     hasher.update(parts.join("\x1f").as_bytes());
     format!("sha256:{:x}", hasher.finalize())
@@ -692,6 +693,8 @@ fn _options_to_wire(options: &SttOptions) -> Value {
         "vadFilter": options.vad_filter,
         "initialPrompt": options.initial_prompt,
         "temperature": options.temperature,
+        "qualityProfile": options.quality_profile,
+        "resegment": options.resegment,
     })
 }
 

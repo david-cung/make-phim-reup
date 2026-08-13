@@ -29,8 +29,8 @@ class SyncSettings:
       Phase 7's default flow uses.
     """
 
-    min_speed: float = 0.85
-    max_speed: float = 1.20
+    min_speed: float = 0.90
+    max_speed: float = 1.12
     output_sample_rate: Optional[int] = None
     output_channels: int = 1
 
@@ -65,8 +65,8 @@ class SyncSettings:
             sr_raw = payload.get("outputSampleRate")
             sr = int(sr_raw) if isinstance(sr_raw, (int, float)) and sr_raw else None
             return cls(
-                min_speed=float(payload.get("minSpeed", 0.85)),
-                max_speed=float(payload.get("maxSpeed", 1.20)),
+                min_speed=float(payload.get("minSpeed", 0.90)),
+                max_speed=float(payload.get("maxSpeed", 1.12)),
                 output_sample_rate=sr,
                 output_channels=int(payload.get("outputChannels", 1)),
             ).normalised()

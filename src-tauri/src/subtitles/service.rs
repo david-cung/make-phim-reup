@@ -136,6 +136,9 @@ impl SubtitleService {
             if let Some(v) = patch.translated_text {
                 seg.translated_text = v;
             }
+            if let Some(v) = patch.dubbing_text {
+                seg.dubbing_text = v;
+            }
             if let Some(v) = patch.speaker {
                 seg.speaker = v;
             }
@@ -180,6 +183,8 @@ impl SubtitleService {
                 end,
                 source_text: String::new(),
                 translated_text: String::new(),
+                dubbing_text: String::new(),
+                words: None,
                 speaker: None,
                 voice_id: None,
             };
@@ -247,6 +252,11 @@ impl SubtitleService {
             let (l_src, r_src) = split_text_in_half(&left.source_text);
             left.source_text = l_src;
             right.source_text = r_src;
+            let (l_dub, r_dub) = split_text_in_half(&left.dubbing_text);
+            left.dubbing_text = l_dub;
+            right.dubbing_text = r_dub;
+            left.words = None;
+            right.words = None;
             doc.segments[idx] = left;
             doc.segments.insert(idx + 1, right);
             doc.dirty.mark_downstream();
@@ -276,6 +286,7 @@ impl SubtitleService {
             cur.end = next.end.max(cur.end);
             cur.source_text = join_nonempty(&cur.source_text, &next.source_text, " ");
             cur.translated_text = join_nonempty(&cur.translated_text, &next.translated_text, " ");
+            cur.dubbing_text = join_nonempty(&cur.dubbing_text, &next.dubbing_text, " ");
             if cur.speaker.is_none() {
                 cur.speaker = next.speaker;
             }

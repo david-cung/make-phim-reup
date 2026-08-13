@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 TRANSLATION_PROMPT_V1 = "translation_prompt_v1"
+TRANSLATION_PROMPT_V2 = "translation_prompt_v2"
 
 # ISO-639-1 → human name. Only entries here get pretty-printed in the
 # prompt; everything else falls back to the code itself.
@@ -143,8 +144,99 @@ def render_chunk_messages_v1(
     ]
 
 
+def system_prompt_v2(source_lang: str, target_lang: str) -> str:
+    src = language_name(source_lang)
+    tgt = language_name(target_lang)
+    spoken = "Vietnamese movie dialogue" if (target_lang or "").lower() == "vi" else f"spoken {tgt}"
+    return (
+        f"You are a professional movie dialogue translator working from {src} into {tgt}.\n\n"
+        "PRIORITY ORDER:\n"
+        "1. Meaning of the CURRENT line\n"
+        "2. Natural spoken " + spoken + "\n"
+        "3. Character tone and register\n"
+        "4. Surrounding PREVIOUS / NEXT lines\n"
+        "5. Conciseness that still fits a subtitle\n\n"
+        "RULES:\n"
+        "- Translate ONLY the CURRENT / CHUNK lines. Use PREVIOUS and NEXT only as context.\n"
+        "- Sound like people talking in a film, not a document.\n"
+        "- Prefer short, idiomatic spoken lines over literal word-by-word rendering.\n"
+        "- Keep names, places, and important terms.\n"
+        "- Match formality, intimacy, and profanity of the source.\n"
+        "- Do not add explanations, honorifics, or translator notes.\n"
+        "- Do not make every line overly formal Vietnamese (avoid newspaper style).\n"
+        "- Keep each line short enough to speak in the same time as the original.\n\n"
+        "OUTPUT FORMAT:\n"
+        "Return a single JSON object:\n"
+        '{ "segments": [ { "id": <int>, "translation": "<spoken subtitle>" } ] }\n'
+        "No Markdown, no code fences, no extra prose."
+    )
+
+
+def user_prompt_v2(
+    *,
+    source_lang: str,
+    target_lang: str,
+    context_before: Iterable[dict],
+    chunk: Iterable[dict],
+    context_after: Iterable[dict],
+    hint: Optional[str] = None,
+) -> str:
+    src = language_name(source_lang)
+    tgt = language_name(target_lang)
+    before = json.dumps(list(context_before), ensure_ascii=False, indent=2)
+    now = json.dumps(list(chunk), ensure_ascii=False, indent=2)
+    after = json.dumps(list(context_after), ensure_ascii=False, indent=2)
+    hint_line = f"\nNOTE:\n{hint}\n" if hint else ""
+    return (
+        f"Translate movie dialogue from {src} into natural spoken {tgt}.\n"
+        f"{hint_line}\n"
+        "PREVIOUS:\n"
+        f"{before}\n\n"
+        "CURRENT (translate these):\n"
+        f"{now}\n\n"
+        "NEXT:\n"
+        f"{after}\n\n"
+        'Return JSON: { "segments": [ {"id": ..., "translation": "..."} ] }'
+    )
+
+
+def render_chunk_messages(
+    *,
+    prompt_version: str,
+    source_lang: str,
+    target_lang: str,
+    context_before: Iterable[dict],
+    chunk: Iterable[dict],
+    context_after: Iterable[dict],
+    hint: Optional[str] = None,
+) -> list[PromptMessage]:
+    if prompt_version == TRANSLATION_PROMPT_V2:
+        return [
+            PromptMessage("system", system_prompt_v2(source_lang, target_lang)),
+            PromptMessage(
+                "user",
+                user_prompt_v2(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    context_before=context_before,
+                    chunk=chunk,
+                    context_after=context_after,
+                    hint=hint,
+                ),
+            ),
+        ]
+    return render_chunk_messages_v1(
+        source_lang=source_lang,
+        target_lang=target_lang,
+        context_before=context_before,
+        chunk=chunk,
+        context_after=context_after,
+        hint=hint,
+    )
+
+
 def prompt_versions() -> list[str]:
-    return [TRANSLATION_PROMPT_V1]
+    return [TRANSLATION_PROMPT_V1, TRANSLATION_PROMPT_V2]
 
 
 def is_known_version(name: str) -> bool:

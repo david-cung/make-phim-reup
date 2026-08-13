@@ -4,9 +4,9 @@ Public surface:
 
   * :class:`~.provider.TTSProvider` — the abstraction the rest of the
     application talks to; concrete engines live behind it.
-  * :class:`~.piper_provider.PiperTTSProvider` — the first supported
-    engine (small, offline, permissive license, good Vietnamese
-    coverage).
+  * :class:`~.manager.TTSManager` — routes engine ids to a provider.
+  * :class:`~.piper_provider.PiperTTSProvider` — the Vietnamese-capable
+    local engine (small, offline, permissive license).
   * :mod:`~.handlers` — RPC handlers, wired into the main dispatcher
     by :func:`.handlers.install`.
 

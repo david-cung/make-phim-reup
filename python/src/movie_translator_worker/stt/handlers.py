@@ -30,6 +30,8 @@ from ..errors import RpcError, RpcErrorCode
 from ..rpc import HandlerContext
 from . import registry
 from .device import default_device, detect_devices
+from .hardware import large_v3_capability, memory_stats, profile_params
+from .segment import resegment
 from .faster_whisper_provider import FasterWhisperProvider
 from .models import (
     Segment,
@@ -87,6 +89,13 @@ def stt_env(_params: dict[str, Any]) -> dict[str, Any]:
         "defaultDevice": default_device(devices),
         "whisperInstalled": _whisper_installed(),
         "modelsRoot": str(_models_root()),
+        "hardware": memory_stats(),
+        "largeV3": large_v3_capability(),
+        "profiles": {
+            "fast": profile_params("fast"),
+            "balanced": profile_params("balanced"),
+            "quality": profile_params("quality"),
+        },
     }
 
 
@@ -153,6 +162,9 @@ def stt_transcribe(params: dict[str, Any], ctx: HandlerContext) -> dict[str, Any
     if ctx.cancelled():
         raise RpcError(RpcErrorCode.CANCELLED, "transcription cancelled by user")
 
+    if options.resegment:
+        on_progress(0.97, "segmenting", None)
+        segments = resegment(segments)
     validate_segments(segments)
     on_progress(1.0, "completed", None)
 
@@ -280,16 +292,21 @@ def _options_from_params(params: dict[str, Any]) -> TranscribeOptions:
     compute_type = opts.get("computeType") or ("float16" if device == "cuda" else "int8")
 
     try:
+        profile = opts.get("qualityProfile") or opts.get("profile")
+        profile_defaults = profile_params(str(profile)) if isinstance(profile, str) and profile else None
+        model = str(opts.get("model") or (profile_defaults["model"] if profile_defaults else "medium"))
         return TranscribeOptions(
-            model=str(opts.get("model") or "small"),
+            model=model,
             language=lang_norm,
             device=str(device),
             compute_type=str(compute_type),
-            beam_size=int(opts.get("beamSize", 5)),
-            word_timestamps=bool(opts.get("wordTimestamps", False)),
-            vad_filter=bool(opts.get("vadFilter", False)),
+            beam_size=int(opts.get("beamSize", profile_defaults["beamSize"] if profile_defaults else 5)),
+            word_timestamps=bool(opts.get("wordTimestamps", True)),
+            vad_filter=bool(opts.get("vadFilter", True)),
             initial_prompt=(opts.get("initialPrompt") or None) or None,
             temperature=float(opts.get("temperature", 0.0)),
+            quality_profile=str(profile) if isinstance(profile, str) and profile else None,
+            resegment=bool(opts.get("resegment", True)),
         )
     except (TypeError, ValueError) as e:
         raise RpcError(RpcErrorCode.INVALID_PARAMS, f"invalid options: {e}") from e
@@ -306,6 +323,8 @@ def _options_to_wire(options: TranscribeOptions) -> dict[str, Any]:
         "vadFilter": options.vad_filter,
         "initialPrompt": options.initial_prompt,
         "temperature": options.temperature,
+        "qualityProfile": options.quality_profile,
+        "resegment": options.resegment,
     }
 
 

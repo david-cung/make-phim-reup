@@ -30,6 +30,7 @@ import {
   defaultSttOptions,
   defaultTranslateOptions,
   isAppError,
+  QUALITY_PROFILE_PRESETS,
   TRANSLATION_LANGUAGES,
   type AppError,
   type ExportKind,
@@ -43,6 +44,7 @@ import {
   type PreviewSyncResult,
   type Project,
   type ProjectMediaState,
+  type QualityProfile,
   type RenderEnv,
   type RenderSettings,
   type RenderSummary,
@@ -81,9 +83,34 @@ import {
 // (`yue`) is listed because Whisper large-v3 supports it distinctly
 // from Mandarin.
 const LANGUAGE_OPTIONS: { code: string | null; label: string }[] = [
-  { code: null, label: "Auto detect (recommended)" },
+  { code: null, label: "Auto detect" },
   ...TRANSLATION_LANGUAGES.map((l) => ({ code: l.code, label: l.label })),
 ];
+
+const STT_PROFILE_META: {
+  id: QualityProfile;
+  label: string;
+  blurb: string;
+}[] = [
+  { id: "fast", label: "Fast", blurb: "Faster processing" },
+  { id: "balanced", label: "Balanced", blurb: "Good quality, reasonable speed" },
+  { id: "quality", label: "Quality", blurb: "Highest transcription accuracy" },
+];
+
+function whisperDisplayName(name: string): string {
+  if (name === "large-v3" || name === "large") return "Whisper large-v3";
+  if (!name) return "Whisper";
+  return `Whisper ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+}
+
+function currentSttProfile(options: SttOptions): QualityProfile | "custom" {
+  const p = options.qualityProfile;
+  if (p === "fast" || p === "balanced" || p === "quality") return p;
+  for (const id of STT_PROFILE_META) {
+    if (QUALITY_PROFILE_PRESETS[id.id].model === options.model) return id.id;
+  }
+  return "custom";
+}
 
 // Phase 12 UX — after a model download is kicked off from a stage
 // panel we need to know which job snapshot to poll. Download jobs
@@ -425,6 +452,18 @@ export default function ProjectView() {
       return { ...prev, model: pick.name };
     });
   }, [translationModels]);
+
+  // Pass the project's source language to Whisper unless the user
+  // already picked a language (including Auto detect after load).
+  useEffect(() => {
+    if (!project) return;
+    const lang = project.sourceLanguage?.trim();
+    if (!lang || lang === "auto" || lang === "und") return;
+    setSttOptions((prev) => {
+      if (prev.language != null) return prev;
+      return { ...prev, language: lang };
+    });
+  }, [project?.id, project?.sourceLanguage]);
 
   // Sync language dropdowns from the project defaults when they land.
   useEffect(() => {
@@ -2077,6 +2116,7 @@ export default function ProjectView() {
                         onImport={handleSubtitleImport}
                         onExport={handleSubtitleExport}
                         hasVideo={!!project.sourceMediaPath}
+                        voices={ttsVoices}
                         ttsManifest={ttsManifest}
                         ttsEngine={ttsEngine}
                         ttsVoiceId={ttsVoiceId}
@@ -2894,6 +2934,12 @@ function Inspector(props: {
                 {seg.translatedText || "—"}
               </div>
             </div>
+            <div className="field">
+              <span>Dubbing</span>
+              <div className="translation-row-source">
+                {seg.dubbingText || seg.translatedText || "—"}
+              </div>
+            </div>
             <button
               className="btn small"
               onClick={() => props.onJumpToSection("subtitles")}
@@ -3401,9 +3447,31 @@ function TranscriptionPanel(props: {
   }
 
   const selectedModel = models.find((m) => m.name === options.model);
+  const profile = currentSttProfile(options);
+  const largeV3 = sttEnv?.largeV3 ?? null;
+  const isLargeV3 =
+    options.model === "large-v3" || options.model === "large";
+  const hardwareBlocked = isLargeV3 && largeV3 != null && largeV3.canRun === false;
   const stage = activeJob?.status === "running" || activeJob?.status === "queued"
     ? guessStage(progress)
     : null;
+
+  const applyProfile = (id: QualityProfile) => {
+    onOptionsChange({
+      ...options,
+      ...QUALITY_PROFILE_PRESETS[id],
+    });
+  };
+
+  const modelStatus = (name: string): string => {
+    if (name === "large-v3" && largeV3 && largeV3.canRun === false) {
+      return "Unavailable";
+    }
+    const info = models.find((m) => m.name === name);
+    if (!info) return "Unknown";
+    if (downloadJob && options.model === name) return "Loading";
+    return info.installed ? "Installed" : "Not installed";
+  };
 
   return (
     <div className="stt-panel">
@@ -3415,33 +3483,80 @@ function TranscriptionPanel(props: {
         </div>
       )}
 
-      <div className="stt-grid">
-        <label className="field">
-          <span>Model</span>
-          <select
-            value={options.model}
-            disabled={!!activeJob || busy}
-            onChange={(e) => onOptionsChange({ ...options, model: e.target.value })}
-          >
-            {models.length === 0 && <option value={options.model}>{options.model}</option>}
-            {models.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.name} — {m.paramsM}M params
-                {m.installed ? "" : "  (not installed)"}
-              </option>
-            ))}
-          </select>
-          {selectedModel && !selectedModel.installed && !downloadJob && (
-            <button
-              className="btn ghost small"
-              onClick={() => onDownloadModel(selectedModel.name)}
-              disabled={busy}
-            >
-              Download {selectedModel.name}
-            </button>
-          )}
-        </label>
+      <div className="field">
+        <span>STT model</span>
+        <div className="stt-profiles" role="radiogroup" aria-label="STT quality">
+          {STT_PROFILE_META.map((item) => {
+            const preset = QUALITY_PROFILE_PRESETS[item.id];
+            const status = modelStatus(preset.model);
+            const selected = profile === item.id;
+            return (
+              <label
+                key={item.id}
+                className={`stt-profile${selected ? " stt-profile--active" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="stt-quality"
+                  checked={selected}
+                  disabled={!!activeJob || busy}
+                  onChange={() => applyProfile(item.id)}
+                />
+                <span>
+                  <b>{item.label}</b>
+                  <span className="stt-profile-model">
+                    {whisperDisplayName(preset.model)}
+                  </span>
+                  <span className="stt-profile-meta">
+                    {item.blurb} · {status}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
 
+      {isLargeV3 && largeV3?.warning && !hardwareBlocked && (
+        <div className="banner banner--warn">
+          {largeV3.warning}
+        </div>
+      )}
+
+      {hardwareBlocked && (
+        <div className="banner banner--warn">
+          <div>
+            {largeV3?.reason ||
+              "Whisper large-v3 cannot run with the current hardware configuration."}
+          </div>
+          <div className="actions" style={{ marginTop: 8 }}>
+            <button
+              className="btn"
+              type="button"
+              onClick={() => applyProfile("balanced")}
+            >
+              Use Balanced ({whisperDisplayName(QUALITY_PROFILE_PRESETS.balanced.model)})
+            </button>
+          </div>
+        </div>
+      )}
+
+      {selectedModel && !selectedModel.installed && !downloadJob && !hardwareBlocked && (
+        <div className="banner">
+          {whisperDisplayName(selectedModel.name)} is not installed.
+          It can be downloaded during setup; transcription stays offline afterwards.
+          <button
+            className="btn ghost small"
+            style={{ marginLeft: 8 }}
+            onClick={() => onDownloadModel(selectedModel.name)}
+            disabled={busy}
+          >
+            Download {selectedModel.name}
+          </button>
+        </div>
+      )}
+
+      <div className="stt-grid">
         <label className="field">
           <span>Language</span>
           <select
@@ -3459,40 +3574,82 @@ function TranscriptionPanel(props: {
             ))}
           </select>
         </label>
-
-        <label className="field">
-          <span>Device</span>
-          <select
-            value={options.device ?? ""}
-            disabled={!!activeJob || busy}
-            onChange={(e) =>
-              onOptionsChange({
-                ...options,
-                device: e.target.value === "" ? null : e.target.value,
-              })
-            }
-          >
-            <option value="">Auto ({sttEnv?.defaultDevice ?? "cpu"})</option>
-            {(sttEnv?.devices ?? []).map((d) => (
-              <option key={d.kind} value={d.kind} disabled={!d.supported}>
-                {d.label}{d.supported ? "" : " (unsupported)"}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="field field--check">
-          <input
-            type="checkbox"
-            checked={options.wordTimestamps}
-            disabled={!!activeJob || busy}
-            onChange={(e) =>
-              onOptionsChange({ ...options, wordTimestamps: e.target.checked })
-            }
-          />
-          <span>Word-level timestamps</span>
-        </label>
       </div>
+
+      <details className="stt-advanced">
+        <summary>Advanced</summary>
+        <div className="stt-grid">
+          <label className="field">
+            <span>Exact model</span>
+            <select
+              value={options.model}
+              disabled={!!activeJob || busy}
+              onChange={(e) =>
+                onOptionsChange({
+                  ...options,
+                  model: e.target.value,
+                  qualityProfile: "custom",
+                })
+              }
+            >
+              {models.length === 0 && (
+                <option value={options.model}>{options.model}</option>
+              )}
+              {models.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.name} — {m.paramsM}M params
+                  {m.installed ? "" : "  (not installed)"}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field">
+            <span>Device</span>
+            <select
+              value={options.device ?? ""}
+              disabled={!!activeJob || busy}
+              onChange={(e) =>
+                onOptionsChange({
+                  ...options,
+                  device: e.target.value === "" ? null : e.target.value,
+                })
+              }
+            >
+              <option value="">Auto ({sttEnv?.defaultDevice ?? "cpu"})</option>
+              {(sttEnv?.devices ?? []).map((d) => (
+                <option key={d.kind} value={d.kind} disabled={!d.supported}>
+                  {d.label}{d.supported ? "" : " (unsupported)"}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="field field--check">
+            <input
+              type="checkbox"
+              checked={options.wordTimestamps}
+              disabled={!!activeJob || busy}
+              onChange={(e) =>
+                onOptionsChange({ ...options, wordTimestamps: e.target.checked })
+              }
+            />
+            <span>Word-level timestamps</span>
+          </label>
+
+          <label className="field field--check">
+            <input
+              type="checkbox"
+              checked={options.vadFilter}
+              disabled={!!activeJob || busy}
+              onChange={(e) =>
+                onOptionsChange({ ...options, vadFilter: e.target.checked })
+              }
+            />
+            <span>Voice activity detection</span>
+          </label>
+        </div>
+      </details>
 
       {downloadJob ? (
         <div className="stt-progress">
@@ -3532,10 +3689,12 @@ function TranscriptionPanel(props: {
         <div className="actions">
           <button
             className="btn primary"
-            disabled={busy || !selectedModel}
+            disabled={busy || !selectedModel || hardwareBlocked}
             onClick={onTranscribe}
             title={
-              selectedModel && !selectedModel.installed
+              hardwareBlocked
+                ? "Whisper large-v3 cannot run on this hardware. Switch to Balanced."
+                : selectedModel && !selectedModel.installed
                 ? `Model ${selectedModel.name} will be downloaded first, then transcription starts automatically.`
                 : undefined
             }
@@ -4033,7 +4192,7 @@ function TranslationRow(props: {
 
 // ---------------- Subtitle panel ----------------
 
-const SUBTITLE_ROW_HEIGHT = 176; // rough px height per row for virtualization
+const SUBTITLE_ROW_HEIGHT = 232; // rough px height per row for virtualization
 const SUBTITLE_LIST_HEIGHT = 520;
 const SUBTITLE_OVERSCAN = 4;
 
@@ -4053,6 +4212,7 @@ function SubtitlePanel(props: {
   onMerge: (id: number) => void;
   onImport: () => void;
   onExport: (format: SubtitleFormat, kind: ExportKind) => void;
+  voices: VoiceInfo[];
   ttsManifest: TtsManifest | null;
   ttsEngine: string;
   ttsVoiceId: string;
@@ -4080,6 +4240,7 @@ function SubtitlePanel(props: {
     onMerge,
     onImport,
     onExport,
+    voices,
     ttsManifest,
     ttsEngine,
     ttsVoiceId,
@@ -4247,6 +4408,7 @@ function SubtitlePanel(props: {
         onDelete={onDelete}
         onSplit={onSplit}
         onMerge={onMerge}
+        voices={voices}
         ttsManifest={ttsManifest}
         ttsEngine={ttsEngine}
         ttsVoiceId={ttsVoiceId}
@@ -4272,6 +4434,7 @@ function SubtitleList(props: {
   onDelete: (id: number) => void;
   onSplit: (id: number, time: number) => void;
   onMerge: (id: number) => void;
+  voices: VoiceInfo[];
   ttsManifest: TtsManifest | null;
   ttsEngine: string;
   ttsVoiceId: string;
@@ -4293,6 +4456,7 @@ function SubtitleList(props: {
     onDelete,
     onSplit,
     onMerge,
+    voices,
     ttsManifest,
     ttsEngine,
     ttsVoiceId,
@@ -4360,6 +4524,7 @@ function SubtitleList(props: {
                 onDelete={onDelete}
                 onSplit={onSplit}
                 onMerge={onMerge}
+                voices={voices}
                 ttsStatus={computeTtsStatus(
                   seg,
                   ttsManifest,
@@ -4396,6 +4561,7 @@ function SubtitleRow(props: {
   onDelete: (id: number) => void;
   onSplit: (id: number, time: number) => void;
   onMerge: (id: number) => void;
+  voices: VoiceInfo[];
   ttsStatus: TtsRowStatus;
   onTtsPreview: (segmentId: number) => void;
   onTtsRegenerate: (segmentId: number) => void;
@@ -4414,6 +4580,7 @@ function SubtitleRow(props: {
     onDelete,
     onSplit,
     onMerge,
+    voices,
     ttsStatus,
     onTtsPreview,
     onTtsRegenerate,
@@ -4423,12 +4590,14 @@ function SubtitleRow(props: {
   } = props;
   const [source, setSource] = useState(seg.sourceText);
   const [translated, setTranslated] = useState(seg.translatedText);
+  const [dubbing, setDubbing] = useState(seg.dubbingText ?? "");
   const [speaker, setSpeaker] = useState(seg.speaker ?? "");
   const [voice, setVoice] = useState(seg.voiceId ?? "");
   const [startStr, setStartStr] = useState(formatTimecode(seg.start));
   const [endStr, setEndStr] = useState(formatTimecode(seg.end));
   useEffect(() => setSource(seg.sourceText), [seg.sourceText]);
   useEffect(() => setTranslated(seg.translatedText), [seg.translatedText]);
+  useEffect(() => setDubbing(seg.dubbingText ?? ""), [seg.dubbingText]);
   useEffect(() => setSpeaker(seg.speaker ?? ""), [seg.speaker]);
   useEffect(() => setVoice(seg.voiceId ?? ""), [seg.voiceId]);
   useEffect(() => setStartStr(formatTimecode(seg.start)), [seg.start]);
@@ -4489,19 +4658,44 @@ function SubtitleRow(props: {
             }
           }}
         />
-        <input
-          className="subtitle-voice"
-          placeholder="Voice"
-          value={voice}
-          onChange={(e) => setVoice(e.target.value)}
-          onBlur={() => {
-            if ((seg.voiceId ?? "") !== voice) {
-              onPatch(seg.id, {
-                voiceId: voice.trim() === "" ? null : voice,
-              });
-            }
-          }}
-        />
+        {voices.length > 0 ? (
+          <select
+            className="subtitle-voice"
+            value={voice}
+            onChange={(e) => {
+              const next = e.target.value;
+              setVoice(next);
+              if ((seg.voiceId ?? "") !== next) {
+                onPatch(seg.id, {
+                  voiceId: next.trim() === "" ? null : next,
+                });
+              }
+            }}
+            aria-label="Voice"
+          >
+            <option value="">Default voice</option>
+            {voices.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name}
+                {v.gender && v.gender !== "unknown" ? ` · ${v.gender}` : ""}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            className="subtitle-voice"
+            placeholder="Voice"
+            value={voice}
+            onChange={(e) => setVoice(e.target.value)}
+            onBlur={() => {
+              if ((seg.voiceId ?? "") !== voice) {
+                onPatch(seg.id, {
+                  voiceId: voice.trim() === "" ? null : voice,
+                });
+              }
+            }}
+          />
+        )}
       </div>
       <div className="subtitle-row-body">
         <textarea
@@ -4525,6 +4719,18 @@ function SubtitleRow(props: {
           onBlur={() => {
             if (translated !== seg.translatedText) {
               onPatch(seg.id, { translatedText: translated });
+            }
+          }}
+        />
+        <textarea
+          className="subtitle-text subtitle-text--dubbing"
+          rows={2}
+          value={dubbing}
+          placeholder="Dubbing text (spoken line)"
+          onChange={(e) => setDubbing(e.target.value)}
+          onBlur={() => {
+            if (dubbing !== (seg.dubbingText ?? "")) {
+              onPatch(seg.id, { dubbingText: dubbing });
             }
           }}
         />
@@ -4617,7 +4823,12 @@ function computeTtsStatus(
   defaultVoiceId: string,
   settings: TtsSettings,
 ): TtsRowStatus {
-  const text = (seg.translatedText || seg.sourceText || "").trim();
+  const text = (
+    seg.dubbingText ||
+    seg.translatedText ||
+    seg.sourceText ||
+    ""
+  ).trim();
   if (!text) {
     return {
       state: "missing",

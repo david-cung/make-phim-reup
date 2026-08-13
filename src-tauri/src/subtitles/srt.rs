@@ -74,6 +74,8 @@ pub fn parse(input: &str, start_id: u32) -> Result<Vec<SubtitleSegment>, String>
             end,
             source_text: String::new(),
             translated_text: cleaned_text,
+            dubbing_text: String::new(),
+            words: None,
             speaker: None,
             voice_id: None,
         });
@@ -212,6 +214,8 @@ mod tests {
             end: 3.5,
             source_text: "".into(),
             translated_text: "Xin chào".into(),
+            dubbing_text: String::new(),
+            words: None,
             speaker: None,
             voice_id: None,
         };

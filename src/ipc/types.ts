@@ -285,6 +285,60 @@ export interface SttOptions {
   vadFilter: boolean;
   initialPrompt: string | null;
   temperature: number;
+  qualityProfile?: "fast" | "balanced" | "quality" | string | null;
+  resegment?: boolean;
+}
+
+export type QualityProfile = "fast" | "balanced" | "quality";
+
+export const QUALITY_PROFILE_PRESETS: Record<
+  QualityProfile,
+  Pick<SttOptions, "model" | "beamSize" | "wordTimestamps" | "vadFilter" | "qualityProfile" | "resegment">
+> = {
+  fast: {
+    model: "small",
+    beamSize: 1,
+    wordTimestamps: true,
+    vadFilter: true,
+    qualityProfile: "fast",
+    resegment: true,
+  },
+  balanced: {
+    model: "medium",
+    beamSize: 5,
+    wordTimestamps: true,
+    vadFilter: true,
+    qualityProfile: "balanced",
+    resegment: true,
+  },
+  quality: {
+    model: "large-v3",
+    beamSize: 8,
+    wordTimestamps: true,
+    vadFilter: true,
+    qualityProfile: "quality",
+    resegment: true,
+  },
+};
+
+export interface SttHardwareInfo {
+  ramTotalGb?: number | null;
+  ramAvailableGb?: number | null;
+  os?: string;
+  arch?: string;
+}
+
+export interface LargeV3Capability {
+  canRun: boolean;
+  model: string;
+  device: string;
+  computeType: string;
+  fallbackModel: string;
+  reason: string | null;
+  warning: string | null;
+  ramTotalGb?: number | null;
+  ramAvailableGb?: number | null;
+  vramGb?: number | null;
 }
 
 export interface SttDeviceInfo {
@@ -300,6 +354,9 @@ export interface SttEnv {
   defaultDevice: string;
   whisperInstalled: boolean;
   modelsRoot: string;
+  hardware?: SttHardwareInfo | null;
+  largeV3?: LargeV3Capability | null;
+  profiles?: Record<string, unknown> | null;
 }
 
 export interface WhisperModelInfo {
@@ -355,15 +412,17 @@ export function defaultSttOptions(
   overrides: Partial<SttOptions> = {},
 ): SttOptions {
   return {
-    model: "small",
+    model: "medium",
     language: null,
     device: null,
     computeType: null,
     beamSize: 5,
-    wordTimestamps: false,
-    vadFilter: false,
+    wordTimestamps: true,
+    vadFilter: true,
     initialPrompt: null,
     temperature: 0,
+    qualityProfile: "balanced",
+    resegment: true,
     ...overrides,
   };
 }
@@ -416,6 +475,7 @@ export interface TranslatedSegment {
   id: number;
   sourceText: string;
   translation: string;
+  dubbing?: string;
   start: number;
   end: number;
   edited: boolean;
@@ -497,9 +557,9 @@ export function defaultTranslateOptions(
     model: "",
     sourceLanguage: "en",
     targetLanguage: "vi",
-    promptVersion: "translation_prompt_v1",
-    chunkSize: 30,
-    contextBefore: 4,
+    promptVersion: "translation_prompt_v2",
+    chunkSize: 10,
+    contextBefore: 2,
     contextAfter: 2,
     temperature: 0.2,
     topP: 0.95,
@@ -516,12 +576,20 @@ export function defaultTranslateOptions(
  * from the transcript + translation and then persisted as the
  * user edits it.
  */
+export interface SubtitleWord {
+  text: string;
+  start: number;
+  end: number;
+}
+
 export interface SubtitleSegment {
   id: number;
   start: number;
   end: number;
   sourceText: string;
   translatedText: string;
+  dubbingText?: string;
+  words?: SubtitleWord[] | null;
   speaker?: string | null;
   voiceId?: string | null;
 }
@@ -576,6 +644,7 @@ export interface SubtitleSegmentPatch {
   end?: number;
   sourceText?: string;
   translatedText?: string;
+  dubbingText?: string;
   speaker?: string | null;
   voiceId?: string | null;
 }
@@ -756,8 +825,8 @@ export function defaultSyncSettings(
   overrides: Partial<SyncSettings> = {},
 ): SyncSettings {
   return {
-    minSpeed: 0.85,
-    maxSpeed: 1.2,
+    minSpeed: 0.9,
+    maxSpeed: 1.12,
     outputSampleRate: null,
     outputChannels: 1,
     ...overrides,
@@ -877,13 +946,13 @@ export function defaultMixSettings(
   overrides: Partial<MixSettings> = {},
 ): MixSettings {
   return {
-    originalVolume: 0.25,
-    voiceVolume: 1.0,
+    originalVolume: 0.22,
+    voiceVolume: 1.05,
     duckingEnabled: true,
-    duckingDepthDb: 20.0,
-    duckingThresholdDb: -24.0,
-    duckingAttackMs: 20.0,
-    duckingReleaseMs: 300.0,
+    duckingDepthDb: 22.0,
+    duckingThresholdDb: -22.0,
+    duckingAttackMs: 12.0,
+    duckingReleaseMs: 250.0,
     outputSampleRate: null,
     outputChannels: 2,
     ...overrides,

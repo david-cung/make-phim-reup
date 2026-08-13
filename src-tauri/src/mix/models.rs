@@ -70,25 +70,25 @@ pub struct MixSettings {
 }
 
 fn default_original_volume() -> f32 {
-    0.25
+    0.22
 }
 fn default_voice_volume() -> f32 {
-    1.00
+    1.05
 }
 fn default_ducking_enabled() -> bool {
     true
 }
 fn default_ducking_depth_db() -> f32 {
-    20.0
+    22.0
 }
 fn default_ducking_threshold_db() -> f32 {
-    -24.0
+    -22.0
 }
 fn default_ducking_attack_ms() -> f32 {
-    20.0
+    12.0
 }
 fn default_ducking_release_ms() -> f32 {
-    300.0
+    250.0
 }
 fn default_output_channels() -> u32 {
     2

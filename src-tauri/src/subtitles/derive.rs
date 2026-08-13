@@ -13,7 +13,7 @@ use crate::stt::Transcript;
 use crate::translation::TranslationDoc;
 
 use super::models::{
-    DerivedFrom, DirtyFlags, SubtitleDoc, SubtitleSegment, SUBTITLE_SCHEMA_VERSION,
+    DerivedFrom, DirtyFlags, SubtitleDoc, SubtitleSegment, SubtitleWord, SUBTITLE_SCHEMA_VERSION,
 };
 
 /// Build a fresh `SubtitleDoc` from the transcript (required) and
@@ -37,6 +37,27 @@ pub fn derive_from_sources(
                 .and_then(|td| td.segments.iter().find(|s| s.id == t.id))
                 .map(|s| s.translation.clone())
                 .unwrap_or_default(),
+            dubbing_text: translation
+                .and_then(|td| td.segments.iter().find(|s| s.id == t.id))
+                .map(|s| {
+                    let d = s.dubbing.trim();
+                    if d.is_empty() {
+                        s.translation.clone()
+                    } else {
+                        s.dubbing.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            words: t.words.as_ref().map(|words| {
+                words
+                    .iter()
+                    .map(|w| SubtitleWord {
+                        text: w.word.clone(),
+                        start: w.start,
+                        end: w.end,
+                    })
+                    .collect()
+            }),
             speaker: None,
             voice_id: None,
         })
@@ -108,6 +129,14 @@ pub fn merge_preserving_edits(fresh: SubtitleDoc, previous: Option<&SubtitleDoc>
             && prev_seg.translated_text != seg.translated_text
         {
             seg.translated_text = prev_seg.translated_text.clone();
+        }
+        if !prev_seg.dubbing_text.trim().is_empty()
+            && prev_seg.dubbing_text != seg.dubbing_text
+        {
+            seg.dubbing_text = prev_seg.dubbing_text.clone();
+        }
+        if prev_seg.words.is_some() && seg.words.is_none() {
+            seg.words = prev_seg.words.clone();
         }
     }
     // A rebuild is a downstream-invalidating action if anything moved.

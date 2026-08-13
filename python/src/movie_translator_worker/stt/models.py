@@ -45,15 +45,17 @@ class TranscribeOptions:
     invalidation is trivial (a hash of the options + audio fingerprint).
     """
 
-    model: str = "small"
+    model: str = "medium"
     language: Optional[str] = None  # None => auto detect
     device: str = "cpu"
     compute_type: str = "int8"
     beam_size: int = 5
-    word_timestamps: bool = False
-    vad_filter: bool = False
+    word_timestamps: bool = True
+    vad_filter: bool = True
     initial_prompt: Optional[str] = None
     temperature: float = 0.0
+    quality_profile: Optional[str] = None
+    resegment: bool = True
 
     def normalised_language(self) -> str:
         return (self.language or "auto").lower()
@@ -187,7 +189,7 @@ def build_cache_key(audio_hash: str, options: TranscribeOptions) -> str:
     cache.
     """
     parts = [
-        "v1",
+        "v2",
         audio_hash,
         options.model,
         options.normalised_language(),
@@ -198,6 +200,7 @@ def build_cache_key(audio_hash: str, options: TranscribeOptions) -> str:
         f"vad={1 if options.vad_filter else 0}",
         f"temp={options.temperature:.4f}",
         f"prompt={options.initial_prompt or ''}",
+        f"reseg={1 if options.resegment else 0}",
     ]
     payload = "\x1f".join(parts).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()

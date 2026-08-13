@@ -39,11 +39,12 @@ from .models import (
     text_hash,
     validate_batch,
 )
-from .piper_provider import PiperTTSProvider
+from .prosody import shorten_for_duration
+from .manager import TTSManager
 from .provider import ProviderCancelled, ProviderError, TTSProvider
 
 _MODELS_ROOT: Optional[Path] = None
-_PROVIDERS: dict[str, TTSProvider] = {}
+_MANAGER: Optional[TTSManager] = None
 
 
 def configure(
@@ -57,9 +58,9 @@ def configure(
     the mapping empty and real providers are constructed lazily on
     first use so importing this module stays cheap.
     """
-    global _MODELS_ROOT, _PROVIDERS
+    global _MODELS_ROOT, _MANAGER
     _MODELS_ROOT = Path(models_root)
-    _PROVIDERS = dict(providers) if providers else {}
+    _MANAGER = TTSManager(_MODELS_ROOT, providers)
     registry.ensure_tts_root(_MODELS_ROOT)
 
 
@@ -70,16 +71,9 @@ def _models_root() -> Path:
 
 
 def _provider_for(engine: str) -> TTSProvider:
-    if engine in _PROVIDERS:
-        return _PROVIDERS[engine]
-    if engine == "piper":
-        provider = PiperTTSProvider(_models_root())
-        _PROVIDERS[engine] = provider
-        return provider
-    raise RpcError(
-        RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
-        f"unknown TTS engine: {engine}",
-    )
+    if _MANAGER is None:
+        raise RpcError(RpcErrorCode.INTERNAL, "tts handlers not configured")
+    return _MANAGER.provider(engine)
 
 
 # ---------------------------------------------------------------- sync methods
@@ -293,7 +287,14 @@ def tts_synthesize_one(
         raise RpcError(RpcErrorCode.CANCELLED, "cancelled before start")
 
     try:
-        result = provider.synthesize(text, voice_id, output_path, settings)
+        result = _synthesize_fitting(
+            provider,
+            text=text,
+            voice_id=voice_id,
+            output_path=output_path,
+            settings=settings,
+            target_duration=params.get("targetDurationSecs"),
+        )
     except ProviderCancelled as e:
         raise RpcError(RpcErrorCode.CANCELLED, "tts cancelled by user") from e
     except ProviderError as e:
@@ -416,7 +417,14 @@ def tts_synthesize_batch(
         )
 
         try:
-            result = provider.synthesize(seg.text, voice_id, str(dst), settings)
+            result = _synthesize_fitting(
+                provider,
+                text=seg.text,
+                voice_id=voice_id,
+                output_path=str(dst),
+                settings=settings,
+                target_duration=seg.target_duration_secs,
+            )
         except ProviderCancelled as e:
             raise RpcError(RpcErrorCode.CANCELLED, "tts cancelled by user") from e
         except ProviderError as e:
@@ -515,7 +523,9 @@ def tts_synthesize_batch(
 def tts_unload(_params: dict[str, Any]) -> dict[str, Any]:
     """Explicitly release every loaded engine's runtime state."""
     released: list[str] = []
-    for name, provider in list(_PROVIDERS.items()):
+    if _MANAGER is None:
+        return {"ok": True, "released": released}
+    for name, provider in _MANAGER.items():
         try:
             provider.unload()
             released.append(name)
@@ -538,6 +548,43 @@ def install(dispatcher) -> None:
 
 
 # ------------------------------------------------------------------ helpers
+
+
+def _synthesize_fitting(
+    provider,
+    *,
+    text: str,
+    voice_id: str,
+    output_path: str,
+    settings: TTSSettings,
+    target_duration: Any,
+) -> Any:
+    """Synthesize, then if the line overruns its subtitle window:
+
+    1. shorten filler-heavy spoken text
+    2. apply a small speed increase (≤ 1.12×)
+    3. stop — never ram the voice to fit at any cost
+    """
+    result = provider.synthesize(text, voice_id, output_path, settings)
+    target = None
+    if isinstance(target_duration, (int, float)) and float(target_duration) > 0.2:
+        target = float(target_duration)
+    if target is None or result.duration_secs <= target * 1.06:
+        return result
+
+    ratio = result.duration_secs / target
+    spoken = shorten_for_duration(text, ratio) or text
+    next_settings = settings
+    if ratio > 1.08:
+        faster = min(1.12, settings.normalised().speed * min(ratio, 1.12))
+        next_settings = TTSSettings(
+            speed=faster,
+            pitch=settings.pitch,
+            volume=settings.volume,
+        )
+    if spoken != text or abs(next_settings.speed - settings.speed) > 1e-3:
+        result = provider.synthesize(spoken, voice_id, output_path, next_settings)
+    return result
 
 
 def _require_str(params: dict[str, Any], key: str) -> str:

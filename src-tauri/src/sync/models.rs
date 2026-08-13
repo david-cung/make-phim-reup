@@ -12,9 +12,9 @@ pub const SYNC_CACHE_SCHEMA_VERSION: u32 = 1;
 
 // -------------------------------------------------------------- settings
 
-/// Per-project sync knobs. The default `[0.85, 1.20]` range comes
-/// straight from the phase spec — anything outside it is classified
-/// as `too_long` rather than silently distorted.
+/// Per-project sync knobs. Default `[0.90, 1.12]` keeps time-stretch
+/// mild so Vietnamese TTS stays natural. Anything outside is
+/// `too_long` rather than silently distorted.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncSettings {
@@ -30,10 +30,10 @@ pub struct SyncSettings {
 }
 
 fn default_min_speed() -> f32 {
-    0.85
+    0.90
 }
 fn default_max_speed() -> f32 {
-    1.20
+    1.12
 }
 fn default_output_channels() -> u32 {
     1

@@ -19,6 +19,8 @@ fn seg(id: u32, src: &str, translated: &str, voice: Option<&str>) -> SubtitleSeg
         end: (id as f64) * 2.0 + 1.5,
         source_text: src.into(),
         translated_text: translated.into(),
+        dubbing_text: translated.into(),
+        words: None,
         speaker: None,
         voice_id: voice.map(str::to_string),
     }

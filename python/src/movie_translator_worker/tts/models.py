@@ -122,6 +122,7 @@ class BatchSegment:
     text: str
     voice_id: Optional[str] = None
     settings: Optional[TTSSettings] = None
+    target_duration_secs: Optional[float] = None
 
     @classmethod
     def from_wire(cls, payload: Any) -> "BatchSegment":
@@ -140,7 +141,17 @@ class BatchSegment:
         settings = (
             TTSSettings.from_dict(settings_raw) if isinstance(settings_raw, dict) else None
         )
-        return cls(id=sid, text=text, voice_id=vid, settings=settings)
+        target_raw = payload.get("targetDurationSecs")
+        target: Optional[float] = None
+        if isinstance(target_raw, (int, float)):
+            target = float(target_raw)
+        return cls(
+            id=sid,
+            text=text,
+            voice_id=vid,
+            settings=settings,
+            target_duration_secs=target,
+        )
 
 
 # ------------------------------------------------------------------- cache

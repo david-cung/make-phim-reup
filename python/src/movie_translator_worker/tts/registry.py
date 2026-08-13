@@ -86,7 +86,7 @@ def _piper_voice_from_dir(entry: Path) -> Optional[VoiceInfo]:
     voice_id = str(merged.get("id") or entry.name)
     name = str(merged.get("name") or _prettify_voice_name(entry.name))
     language = str(merged.get("language") or "unknown").lower()
-    gender = str(merged.get("gender") or "unknown").lower()
+    gender = str(merged.get("gender") or _infer_gender(entry.name, name)).lower()
     sample_rate = int(merged.get("sampleRate") or merged.get("sample_rate") or 22050)
     quality = merged.get("quality")
 
@@ -161,6 +161,15 @@ def _infer_from_piper_config(config_json: Path) -> dict[str, Any]:
     if isinstance(quality, str):
         out["quality"] = quality
     return out
+
+
+def _infer_gender(dirname: str, pretty_name: str) -> str:
+    blob = f"{dirname} {pretty_name}".lower()
+    if any(token in blob for token in ("female", "woman", "girl", "vais")):
+        return "female"
+    if any(token in blob for token in ("male", "man", "boy")):
+        return "male"
+    return "unknown"
 
 
 def _prettify_voice_name(dirname: str) -> str:

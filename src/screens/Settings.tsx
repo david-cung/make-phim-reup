@@ -478,6 +478,19 @@ export default function Settings() {
         />
         <Kv k="Default device" v={sttEnv?.defaultDevice ?? "—"} />
         <Kv k="Models root" v={sttEnv?.modelsRoot ?? "—"} mono />
+        {sttEnv?.largeV3 && (
+          <Kv
+            k="Whisper large-v3"
+            v={
+              sttEnv.largeV3.canRun
+                ? "available on this hardware"
+                : "not available on current hardware"
+            }
+          />
+        )}
+        {sttEnv?.largeV3?.reason && !sttEnv.largeV3.canRun && (
+          <div className="banner banner--warn small">{sttEnv.largeV3.reason}</div>
+        )}
         {sttEnv?.devices && sttEnv.devices.length > 0 && (
           <Kv
             k="Devices"
@@ -495,12 +508,29 @@ export default function Settings() {
           </div>
           {whisperModels.map((m) => (
             <div key={m.name} className="kv">
-              <span className="kv-k">{m.name}</span>
+              <span className="kv-k">
+                {m.name === "large-v3" || m.name === "large"
+                  ? `${m.name} (QUALITY)`
+                  : m.name === "medium"
+                    ? `${m.name} (BALANCED)`
+                    : m.name === "small"
+                      ? `${m.name} (FAST)`
+                      : m.name}
+              </span>
               <span className="kv-v">
                 {m.installed
                   ? `installed · ${humanBytes(m.sizeBytes ?? 0)}`
-                  : "not installed"}
-                {!m.installed && (
+                  : m.name === "large-v3" &&
+                      sttEnv?.largeV3 &&
+                      sttEnv.largeV3.canRun === false
+                    ? "unavailable on this hardware"
+                    : "not installed"}
+                {!m.installed &&
+                  !(
+                    m.name === "large-v3" &&
+                    sttEnv?.largeV3 &&
+                    sttEnv.largeV3.canRun === false
+                  ) && (
                   <button
                     className="btn ghost small"
                     style={{ marginLeft: 8 }}

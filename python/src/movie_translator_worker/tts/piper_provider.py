@@ -29,6 +29,7 @@ from ..errors import RpcErrorCode
 from .models import SynthesisResult, TTSSettings, VoiceInfo
 from .provider import ProviderError, TTSProvider
 from .registry import list_piper_voices, resolve_piper_voice
+from .prosody import PAUSE_MS_ELLIPSIS, shorten_for_duration, silence_pcm16, split_spoken_units
 from .wav_io import apply_volume_pcm16, probe_wav, write_pcm16_mono
 
 
@@ -183,13 +184,18 @@ class PiperTTSProvider(TTSProvider):
                 getattr(self._voice, "config", None), "sample_rate", info.sample_rate
             )
 
-        cfg = SynthesisConfig(length_scale=float(length_scale))
-        chunks: list[bytes] = []
+        cfg = SynthesisConfig(length_scale=float(length_scale), noise_scale=0.667, noise_w=0.8)
+        sample_rate = int(self._voice_sample_rate or info.sample_rate)
+        pcm = bytearray()
+        units = split_spoken_units(text)
         try:
-            for audio in self._voice.synthesize(text, syn_config=cfg):
-                data = getattr(audio, "audio_int16_bytes", None)
-                if data:
-                    chunks.append(data)
+            for i, (unit, pause_ms) in enumerate(units):
+                for audio in self._voice.synthesize(unit, syn_config=cfg):
+                    data = getattr(audio, "audio_int16_bytes", None)
+                    if data:
+                        pcm.extend(data)
+                if pause_ms > 0 and i < len(units) - 1:
+                    pcm.extend(silence_pcm16(sample_rate, pause_ms))
         except MemoryError as e:  # pragma: no cover
             raise ProviderError(
                 RpcErrorCode.TTS_OUT_OF_MEMORY,
@@ -202,13 +208,12 @@ class PiperTTSProvider(TTSProvider):
                 f"piper synthesis failed: {e}",
             ) from e
 
-        if not chunks:
+        if not pcm:
             raise ProviderError(
                 RpcErrorCode.TTS_ENGINE_FAILURE,
                 "piper produced no audio samples",
             )
-        sample_rate = int(self._voice_sample_rate or info.sample_rate)
-        write_pcm16_mono(dst, b"".join(chunks), sample_rate=sample_rate)
+        write_pcm16_mono(dst, bytes(pcm), sample_rate=sample_rate)
 
     def _synthesize_via_cli(
         self,

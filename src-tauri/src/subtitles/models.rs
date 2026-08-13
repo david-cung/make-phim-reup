@@ -25,10 +25,24 @@ pub struct SubtitleSegment {
     pub source_text: String,
     #[serde(default)]
     pub translated_text: String,
+    /// Spoken line used for TTS. May be slightly shorter than the
+    /// on-screen subtitle. Empty means "use translated_text".
+    #[serde(default)]
+    pub dubbing_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<SubtitleWord>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleWord {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
 }
 
 impl SubtitleSegment {
@@ -289,6 +303,8 @@ pub struct SubtitleSegmentPatch {
     pub source_text: Option<String>,
     #[serde(default)]
     pub translated_text: Option<String>,
+    #[serde(default)]
+    pub dubbing_text: Option<String>,
     /// `Some(Some(_))` = set, `Some(None)` = clear, `None` = leave.
     #[serde(default, deserialize_with = "deserialize_optional_option")]
     pub speaker: Option<Option<String>>,
@@ -313,7 +329,10 @@ impl SubtitleSegmentPatch {
     /// Returns `true` iff this patch touches a field whose change
     /// invalidates the TTS output itself (text / speaker / voice).
     pub fn touches_content(&self) -> bool {
-        self.translated_text.is_some() || self.speaker.is_some() || self.voice_id.is_some()
+        self.translated_text.is_some()
+            || self.dubbing_text.is_some()
+            || self.speaker.is_some()
+            || self.voice_id.is_some()
     }
 
     /// Returns `true` iff this patch changes timing without touching

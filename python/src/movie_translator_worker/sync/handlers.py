@@ -61,8 +61,8 @@ def sync_env(_params: dict[str, Any]) -> dict[str, Any]:
     return {
         "ffmpegAvailable": ff is not None,
         "ffmpegPath": ff,
-        "defaultMinSpeed": 0.85,
-        "defaultMaxSpeed": 1.20,
+        "defaultMinSpeed": 0.90,
+        "defaultMaxSpeed": 1.12,
     }
 
 

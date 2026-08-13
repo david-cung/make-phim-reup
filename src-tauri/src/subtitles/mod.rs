@@ -23,6 +23,6 @@ pub use cache::{SubtitleCacheFile, SUBTITLES_FILENAME, SUBTITLES_RELATIVE};
 pub use errors::SubtitleError;
 pub use models::{
     DirtyFlags, ExportKind, ExportSubtitlesResult, ImportSubtitlesResult, SubtitleDoc,
-    SubtitleFormat, SubtitleSegment, SubtitleSegmentPatch, SubtitleSummary,
+    SubtitleFormat, SubtitleSegment, SubtitleSegmentPatch, SubtitleSummary, SubtitleWord,
 };
 pub use service::SubtitleService;

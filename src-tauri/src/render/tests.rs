@@ -41,6 +41,8 @@ fn subtitle(id: u32, start: f64, end: f64) -> SubtitleSegment {
         end,
         source_text: String::new(),
         translated_text: "xin chào".into(),
+        dubbing_text: "xin chào".into(),
+        words: None,
         speaker: None,
         voice_id: None,
     }

@@ -108,6 +108,7 @@ pub fn empty_doc_from(
             id: *id,
             source_text: text.clone(),
             translation: String::new(),
+            dubbing: String::new(),
             start: *start,
             end: *end,
             edited: false,
@@ -137,7 +138,12 @@ pub fn apply_chunk(doc: &mut TranslationDoc, updates: &[(u32, String)]) -> u32 {
     let mut hits = 0u32;
     for (id, text) in updates {
         if let Some(seg) = doc.segments.iter_mut().find(|s| s.id == *id) {
+            let custom_dubbing = !seg.dubbing.trim().is_empty()
+                && seg.dubbing.trim() != seg.translation.trim();
             seg.translation = text.clone();
+            if !custom_dubbing {
+                seg.dubbing = text.clone();
+            }
             hits += 1;
         }
     }
@@ -177,6 +183,11 @@ mod tests {
                     } else {
                         "".into()
                     },
+                    dubbing: if filled {
+                        "Xin chào".into()
+                    } else {
+                        "".into()
+                    },
                     start: 0.0,
                     end: 1.0,
                     edited: false,
@@ -185,6 +196,11 @@ mod tests {
                     id: 1,
                     source_text: "World".into(),
                     translation: if filled {
+                        "thế giới".into()
+                    } else {
+                        "".into()
+                    },
+                    dubbing: if filled {
                         "thế giới".into()
                     } else {
                         "".into()

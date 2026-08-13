@@ -31,6 +31,7 @@ class TranslatedSegment:
     start: float
     end: float
     edited: bool = False
+    dubbing: str = ""
 
 
 @dataclass
@@ -59,9 +60,9 @@ class TranslateOptions:
     model: str
     source_language: str = "en"
     target_language: str = "vi"
-    prompt_version: str = "translation_prompt_v1"
-    chunk_size: int = 30
-    context_before: int = 4
+    prompt_version: str = "translation_prompt_v2"
+    chunk_size: int = 10
+    context_before: int = 2
     context_after: int = 2
     temperature: float = 0.2
     top_p: float = 0.95
@@ -72,7 +73,7 @@ class TranslateOptions:
             model=self.model,
             source_language=(self.source_language or "").lower() or "en",
             target_language=(self.target_language or "").lower() or "vi",
-            prompt_version=self.prompt_version or "translation_prompt_v1",
+            prompt_version=self.prompt_version or "translation_prompt_v2",
             chunk_size=max(1, int(self.chunk_size)),
             context_before=max(0, int(self.context_before)),
             context_after=max(0, int(self.context_after)),
@@ -272,14 +273,20 @@ def merge_translations(
     out: list[TranslatedSegment] = []
     for seg in base:
         if seg.id in updates:
+            new_text = updates[seg.id]
+            custom_dubbing = (
+                bool(seg.dubbing.strip())
+                and seg.dubbing.strip() != seg.translation.strip()
+            )
             out.append(
                 TranslatedSegment(
                     id=seg.id,
                     source_text=seg.source_text,
-                    translation=updates[seg.id],
+                    translation=new_text,
                     start=seg.start,
                     end=seg.end,
                     edited=True if mark_edited else seg.edited,
+                    dubbing=seg.dubbing if custom_dubbing else new_text,
                 )
             )
         else:
@@ -298,6 +305,7 @@ def _segment_to_dict(s: TranslatedSegment) -> dict[str, Any]:
         "id": s.id,
         "sourceText": s.source_text,
         "translation": s.translation,
+        "dubbing": s.dubbing or s.translation,
         "start": round(s.start, 3),
         "end": round(s.end, 3),
         "edited": bool(s.edited),
@@ -308,13 +316,15 @@ def _segment_from_dict(payload: Any) -> TranslatedSegment:
     if not isinstance(payload, dict):
         raise ValueError("translated segment must be an object")
     try:
+        translation = str(payload.get("translation", ""))
         return TranslatedSegment(
             id=int(payload["id"]),
             source_text=str(payload.get("sourceText", "")),
-            translation=str(payload.get("translation", "")),
+            translation=translation,
             start=float(payload.get("start", 0.0)),
             end=float(payload.get("end", 0.0)),
             edited=bool(payload.get("edited", False)),
+            dubbing=str(payload.get("dubbing", "") or translation),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError(f"invalid translated segment: {e}") from e

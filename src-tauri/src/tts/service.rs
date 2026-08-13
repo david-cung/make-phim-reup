@@ -77,6 +77,7 @@ struct TodoEntry {
     text: String,
     voice_id: String,
     settings: TtsSettings,
+    target_duration_secs: f64,
 }
 
 impl TtsService {
@@ -440,6 +441,7 @@ impl TtsService {
             "text": text,
             "outputPath": abs.display().to_string(),
             "settings": settings_to_wire(&effective_settings),
+            "targetDurationSecs": (seg.end - seg.start).max(0.0),
         });
         let request_id = self.worker.new_request_id();
         let v = self
@@ -543,6 +545,7 @@ impl TtsService {
                     "text": t.text,
                     "voiceId": t.voice_id,
                     "settings": settings_to_wire(&t.settings),
+                    "targetDurationSecs": t.target_duration_secs,
                 })
             })
             .collect::<Vec<_>>();
@@ -1002,9 +1005,13 @@ fn map_project_err(err: crate::projects::ProjectError) -> TtsError {
 }
 
 /// Extract the text we should feed the TTS engine for one subtitle.
-/// We prefer `translatedText`; if it's empty, fall back to `sourceText`
-/// so the user can preview without a translation yet.
+/// Prefer `dubbingText` (spoken line), then `translatedText`, then
+/// `sourceText` so the user can preview without a translation yet.
 fn pick_text_for_synthesis(seg: &crate::subtitles::SubtitleSegment) -> String {
+    let dubbing = seg.dubbing_text.trim();
+    if !dubbing.is_empty() {
+        return dubbing.to_string();
+    }
     let translated = seg.translated_text.trim();
     if !translated.is_empty() {
         translated.to_string()
@@ -1164,6 +1171,7 @@ fn plan_generation(
             text,
             voice_id,
             settings: effective_settings,
+            target_duration_secs: (seg.end - seg.start).max(0.0),
         });
     }
     todo

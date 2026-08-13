@@ -23,20 +23,30 @@ pub struct SttOptions {
     pub vad_filter: bool,
     pub initial_prompt: Option<String>,
     pub temperature: f32,
+    #[serde(default)]
+    pub quality_profile: Option<String>,
+    #[serde(default = "default_resegment")]
+    pub resegment: bool,
+}
+
+fn default_resegment() -> bool {
+    true
 }
 
 impl Default for SttOptions {
     fn default() -> Self {
         Self {
-            model: "small".into(),
+            model: "medium".into(),
             language: None,
             device: None,
             compute_type: None,
             beam_size: 5,
-            word_timestamps: false,
-            vad_filter: false,
+            word_timestamps: true,
+            vad_filter: true,
             initial_prompt: None,
             temperature: 0.0,
+            quality_profile: Some("balanced".into()),
+            resegment: true,
         }
     }
 }
@@ -66,6 +76,12 @@ pub struct SttEnv {
     pub default_device: String,
     pub whisper_installed: bool,
     pub models_root: String,
+    #[serde(default)]
+    pub hardware: Option<serde_json::Value>,
+    #[serde(default)]
+    pub large_v3: Option<serde_json::Value>,
+    #[serde(default)]
+    pub profiles: Option<serde_json::Value>,
 }
 
 /// Catalogue entry — one row of the "Model:" dropdown.

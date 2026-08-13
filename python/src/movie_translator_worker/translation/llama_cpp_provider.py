@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 from .. import logging as log
 from ..errors import RpcErrorCode
 from .models import TranslateOptions, TranslationChunk, TranslatedSegment
-from .prompts import PromptMessage, render_chunk_messages_v1
+from .prompts import PromptMessage, render_chunk_messages
 from .provider import (
     ProviderCancelled,
     ProviderError,
@@ -60,7 +60,10 @@ class LlamaCppTranslationProvider(TranslationProvider):
         options: TranslateOptions,
         ctx: TranslateContext,
     ) -> dict[int, str]:
-        if options.prompt_version != "translation_prompt_v1":
+        if options.prompt_version not in (
+            "translation_prompt_v1",
+            "translation_prompt_v2",
+        ):
             raise ProviderError(
                 RpcErrorCode.TRANSLATE_UNKNOWN_PROMPT,
                 f"unknown prompt version: {options.prompt_version}",
@@ -375,7 +378,8 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 return {"id": seg_id, "text": ""}
             return {"id": seg_id, "text": seg.source_text}
 
-        return render_chunk_messages_v1(
+        return render_chunk_messages(
+            prompt_version=options.prompt_version,
             source_lang=options.source_language,
             target_lang=options.target_language,
             context_before=[_row(i) for i in chunk.context_before_ids],

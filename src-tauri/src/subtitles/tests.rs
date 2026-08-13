@@ -55,6 +55,7 @@ fn translation(pairs: Vec<(u32, &str)>) -> TranslationDoc {
                 id,
                 source_text: "".into(),
                 translation: text.into(),
+                dubbing: text.into(),
                 start: 0.0,
                 end: 0.0,
                 edited: false,

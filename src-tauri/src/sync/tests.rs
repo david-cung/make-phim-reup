@@ -26,6 +26,8 @@ fn subtitle(id: u32, start: f64, end: f64, text: &str) -> SubtitleSegment {
         end,
         source_text: String::new(),
         translated_text: text.into(),
+        dubbing_text: text.into(),
+        words: None,
         speaker: None,
         voice_id: Some("vi-narrator".into()),
     }
@@ -136,7 +138,7 @@ fn planner_marks_short_voice_as_fits() {
 fn planner_marks_voice_within_range_as_adjusted() {
     let plan = plan_for(4.0, 4.4, &SyncSettings::default());
     assert_eq!(plan.status, SyncStatus::Adjusted);
-    assert!(plan.speed_factor > 1.0 && plan.speed_factor <= 1.20 + 1e-6);
+    assert!(plan.speed_factor > 1.0 && plan.speed_factor <= 1.12 + 1e-6);
     assert!((plan.final_duration_secs - 4.0).abs() < 1e-3);
 }
 
@@ -144,7 +146,7 @@ fn planner_marks_voice_within_range_as_adjusted() {
 fn planner_marks_extreme_voice_as_too_long() {
     let plan = plan_for(2.0, 4.0, &SyncSettings::default());
     assert_eq!(plan.status, SyncStatus::TooLong);
-    assert!((plan.speed_factor - 1.20).abs() < 1e-6);
+    assert!((plan.speed_factor - 1.12).abs() < 1e-6);
     // Still emit a stretched clip, longer than target.
     assert!(plan.final_duration_secs > 2.0);
 }

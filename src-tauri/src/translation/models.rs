@@ -40,13 +40,13 @@ fn vi() -> String {
     "vi".into()
 }
 fn default_prompt_version() -> String {
-    "translation_prompt_v1".into()
+    "translation_prompt_v2".into()
 }
 fn default_chunk_size() -> u32 {
-    30
+    10
 }
 fn default_context_before() -> u32 {
-    4
+    2
 }
 fn default_context_after() -> u32 {
     2
@@ -120,6 +120,8 @@ pub struct TranslatedSegment {
     pub id: u32,
     pub source_text: String,
     pub translation: String,
+    #[serde(default)]
+    pub dubbing: String,
     pub start: f64,
     pub end: f64,
     #[serde(default)]

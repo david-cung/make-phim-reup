@@ -192,9 +192,19 @@ class FasterWhisperProvider(SpeechToTextProvider):
             "word_timestamps": options.word_timestamps,
             "vad_filter": options.vad_filter,
             "initial_prompt": options.initial_prompt,
+            # Movie audio has overlapping speakers and music; carrying
+            # the previous window as a prompt causes Whisper to invent
+            # repeated lines. Keep each window independent.
+            "condition_on_previous_text": False,
         }
+        if options.vad_filter:
+            kwargs["vad_parameters"] = {
+                "min_silence_duration_ms": 450,
+                "speech_pad_ms": 220,
+            }
         if options.language:
             kwargs["language"] = options.language
+            kwargs["task"] = "transcribe"
         try:
             return model.transcribe(audio_path, **kwargs)
         except MemoryError as e:  # pragma: no cover
