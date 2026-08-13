@@ -53,7 +53,7 @@ python3 -m venv .venv-worker
 # shellcheck disable=SC1091
 source .venv-worker/bin/activate
 python -m pip install --upgrade pip >/dev/null
-python -m pip install -e "python[dev]" >/dev/null
-log "python worker installed (editable) in .venv-worker"
+python -m pip install -e "python[dev,stt,translation,tts]" >/dev/null
+log "python worker and local AI runtimes installed (editable) in .venv-worker"
 
 log "all set. Run: pnpm install && pnpm tauri:dev"

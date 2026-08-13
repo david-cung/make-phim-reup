@@ -35,14 +35,18 @@ def memory_stats() -> dict:
     }
 
 
-def large_v3_capability() -> dict:
+def large_v3_capability(
+    *,
+    mem: Optional[dict] = None,
+    devices: Optional[list] = None,
+) -> dict:
     """Describe whether QUALITY / large-v3 can run on this machine.
 
     ``canRun`` is True when we believe inference will start. It is NOT
     a guarantee the whole movie will finish without swapping.
     """
-    mem = memory_stats()
-    devices = detect_devices()
+    mem = mem if mem is not None else memory_stats()
+    devices = devices if devices is not None else detect_devices()
     device = default_device(devices)
     cuda = next((d for d in devices if d.kind == "cuda" and d.supported), None)
     vram_gb = _cuda_vram_gb() if cuda is not None else None

@@ -582,9 +582,14 @@ async function probeMediaElement(baseUrl: string): Promise<void> {
 export async function initMediaBaseUrl(): Promise<void> {
   try {
     mediaBaseUrl = await invoke<string>("get_media_base_url");
-    await probeMediaElement(mediaBaseUrl);
+    // This is a diagnostic check, not a prerequisite for rendering.
+    // Let bootstrap continue once the URL is available instead of
+    // holding the entire UI behind the probe's five-second timeout.
+    void probeMediaElement(mediaBaseUrl).catch((err) => {
+      console.error("media preview startup check failed", err);
+    });
   } catch (err) {
-    console.error("media preview startup check failed", err);
+    console.error("media preview URL initialization failed", err);
   }
 }
 

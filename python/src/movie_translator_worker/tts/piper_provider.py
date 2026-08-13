@@ -29,7 +29,7 @@ from ..errors import RpcErrorCode
 from .models import SynthesisResult, TTSSettings, VoiceInfo
 from .provider import ProviderError, TTSProvider
 from .registry import list_piper_voices, resolve_piper_voice
-from .prosody import PAUSE_MS_ELLIPSIS, shorten_for_duration, silence_pcm16, split_spoken_units
+from .prosody import silence_pcm16, split_spoken_units
 from .wav_io import apply_volume_pcm16, probe_wav, write_pcm16_mono
 
 

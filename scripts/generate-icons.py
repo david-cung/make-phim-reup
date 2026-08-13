@@ -43,8 +43,10 @@ CORNER_RADIUS_FRACTION = 0.12
 #: Source pixels ignored around the tile's border when compositing.
 EDGE_TRIM = 2
 
-#: Square PNGs written to `src-tauri/icons/<n>x<n>.png`.
-PNG_SIZES = (32, 64, 128, 256, 512, 1024)
+#: Standalone PNGs referenced by `tauri.conf.json`. The 512/1024
+#: renditions are still built in memory for icon.png/ICNS, but writing
+#: duplicate files needlessly adds ~1.6 MB to the repository.
+PNG_SIZES = (32, 64, 128, 256)
 
 #: `icon.png` is Tauri's conventional window/Linux icon; 512 is the size
 #: its templates ship.
@@ -786,8 +788,6 @@ def main() -> int:
 
     master = build_master(sheet)
     ICON_DIR.mkdir(parents=True, exist_ok=True)
-    write_png(master, ICON_DIR / "icon-master.png")
-    print(f"  wrote icon-master.png ({master.width}×{master.height})")
 
     needed = sorted({*PNG_SIZES, *ICO_SIZES, DEFAULT_ICON_SIZE, MASTER_SIZE})
     renditions: dict[int, Image] = {}

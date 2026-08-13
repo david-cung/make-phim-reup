@@ -20,8 +20,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-timeout>=2"]
 stt = ["faster-whisper>=1.0", "huggingface_hub>=0.24"]
-translation = ["llama-cpp-python>=0.2.90"]
-tts = ["piper-tts>=1.2", "onnxruntime>=1.17"]
+translation = ["llama-cpp-python>=0.2.90", "huggingface_hub>=0.24"]
+tts = ["piper-tts>=1.2", "onnxruntime>=1.17", "huggingface_hub>=0.24"]
 
 [project.scripts]
 movie-translator-worker = "movie_translator_worker.__main__:main"

@@ -99,9 +99,13 @@ def user_prompt_v1(
     """
     src = language_name(source_lang)
     tgt = language_name(target_lang)
-    before = json.dumps(list(context_before), ensure_ascii=False, indent=2)
-    now = json.dumps(list(chunk), ensure_ascii=False, indent=2)
-    after = json.dumps(list(context_after), ensure_ascii=False, indent=2)
+    before = json.dumps(
+        list(context_before), ensure_ascii=False, separators=(",", ":")
+    )
+    now = json.dumps(list(chunk), ensure_ascii=False, separators=(",", ":"))
+    after = json.dumps(
+        list(context_after), ensure_ascii=False, separators=(",", ":")
+    )
     hint_line = ""
     if hint:
         hint_line = f"\nTRANSLATOR HINT (do not translate this hint):\n{hint}\n"
@@ -183,9 +187,13 @@ def user_prompt_v2(
 ) -> str:
     src = language_name(source_lang)
     tgt = language_name(target_lang)
-    before = json.dumps(list(context_before), ensure_ascii=False, indent=2)
-    now = json.dumps(list(chunk), ensure_ascii=False, indent=2)
-    after = json.dumps(list(context_after), ensure_ascii=False, indent=2)
+    before = json.dumps(
+        list(context_before), ensure_ascii=False, separators=(",", ":")
+    )
+    now = json.dumps(list(chunk), ensure_ascii=False, separators=(",", ":"))
+    after = json.dumps(
+        list(context_after), ensure_ascii=False, separators=(",", ":")
+    )
     hint_line = f"\nNOTE:\n{hint}\n" if hint else ""
     return (
         f"Translate movie dialogue from {src} into natural spoken {tgt}.\n"

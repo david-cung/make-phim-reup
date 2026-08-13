@@ -1047,9 +1047,3 @@ pub fn plan_for(
         speed_factor: s.max_speed,
     }
 }
-
-// Keep the internal helper reachable from tests too.
-#[allow(dead_code)]
-fn _touch(_: &SyncSegmentEntry) {
-    let _ = build_sync_cache_key;
-}

@@ -10,7 +10,7 @@ prefer (Qwen2, Llama 3, Mistral, Phi, ...).
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 

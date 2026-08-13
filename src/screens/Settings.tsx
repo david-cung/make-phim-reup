@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/state/store";
+import { humanBytes } from "@/utils/format";
 import { api, pickDirectory, pickModelSource } from "@/ipc/bridge";
 import {
   TRANSLATION_LANGUAGES,
@@ -656,19 +657,6 @@ function Kv(props: { k: string; v: string; mono?: boolean }) {
       <span className={"kv-v" + (props.mono ? " mono" : "")}>{props.v}</span>
     </div>
   );
-}
-
-function humanBytes(n: number): string {
-  if (n <= 0) return "0 B";
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
 }
 
 function errorMessage(err: unknown): string {

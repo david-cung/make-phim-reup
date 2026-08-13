@@ -76,9 +76,8 @@ impl FfmpegService {
     /// Attempt to locate a working FFmpeg + FFprobe pair.
     pub async fn detect(override_paths: FfmpegPathOverride) -> Result<Self, FfmpegError> {
         let (ffmpeg, ffprobe) = resolve_paths(&override_paths)?;
-        verify_executable(&ffmpeg, "ffmpeg").await?;
-        verify_executable(&ffprobe, "ffprobe").await?;
-        let version = probe_version(&ffmpeg).await?;
+        let version = verify_executable(&ffmpeg, "ffmpeg").await?;
+        let _ = verify_executable(&ffprobe, "ffprobe").await?;
         let has_subtitles_filter = probe_subtitles_filter(&ffmpeg).await;
         tracing::info!(
             ffmpeg = %ffmpeg.display(),
@@ -245,7 +244,7 @@ fn which_on_path(base: &str) -> Option<PathBuf> {
     None
 }
 
-async fn verify_executable(path: &Path, kind: &'static str) -> Result<(), FfmpegError> {
+async fn verify_executable(path: &Path, kind: &'static str) -> Result<String, FfmpegError> {
     if !path.exists() {
         return Err(match kind {
             "ffprobe" => FfmpegError::ProbeNotFound {
@@ -273,17 +272,6 @@ async fn verify_executable(path: &Path, kind: &'static str) -> Result<(), Ffmpeg
             ),
         });
     }
-    Ok(())
-}
-
-async fn probe_version(ffmpeg: &Path) -> Result<String, FfmpegError> {
-    let out = Command::new(ffmpeg)
-        .arg("-hide_banner")
-        .arg("-version")
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|source| FfmpegError::io("running -version", source))?;
     let first = String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()

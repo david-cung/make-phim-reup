@@ -1,11 +1,38 @@
 //! `ffprobe -print_format json` wrapper → typed metadata.
 
-use std::path::Path;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
+};
 
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use super::errors::FfmpegError;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProbeCacheKey {
+    path: PathBuf,
+    size: u64,
+    modified: Option<SystemTime>,
+}
+
+static PROBE_CACHE: OnceLock<Mutex<HashMap<ProbeCacheKey, VideoMetadata>>> = OnceLock::new();
+
+fn probe_cache() -> &'static Mutex<HashMap<ProbeCacheKey, VideoMetadata>> {
+    PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn probe_cache_key(input: &Path) -> Option<ProbeCacheKey> {
+    let metadata = std::fs::metadata(input).ok()?;
+    Some(ProbeCacheKey {
+        path: input.to_path_buf(),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
 
 /// The metadata surface we expose to the frontend.
 ///
@@ -92,6 +119,16 @@ pub async fn probe_video(ffprobe_bin: &Path, input: &Path) -> Result<VideoMetada
             path: input.to_path_buf(),
         });
     }
+
+    let cache_key = probe_cache_key(input);
+    if let Some(key) = cache_key.as_ref() {
+        if let Ok(cache) = probe_cache().lock() {
+            if let Some(metadata) = cache.get(key) {
+                return Ok(metadata.clone());
+            }
+        }
+    }
+
     let out = Command::new(ffprobe_bin)
         .args([
             "-v",
@@ -115,7 +152,20 @@ pub async fn probe_video(ffprobe_bin: &Path, input: &Path) -> Result<VideoMetada
         });
     }
 
-    parse_ffprobe_json(&out.stdout, input)
+    let parsed = parse_ffprobe_json(&out.stdout, input)?;
+    if let Some(key) = cache_key {
+        if let Ok(mut cache) = probe_cache().lock() {
+            // Keep only the newest stat-version for a path. This bounds
+            // growth while still invalidating immediately when a source or
+            // freshly-rendered output changes size/mtime.
+            cache.retain(|candidate, _| candidate.path != key.path);
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(key, parsed.clone());
+        }
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn parse_ffprobe_json(json: &[u8], input: &Path) -> Result<VideoMetadata, FfmpegError> {

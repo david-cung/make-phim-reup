@@ -85,6 +85,10 @@ import {
 // thirty.
 const REFRESH_DEBOUNCE_MS = 350;
 const debounceTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+const PROGRESS_UI_INTERVAL_MS = 100;
+const progressLastCommitted = new Map<string, number>();
+let bootstrapStarted = false;
+
 function debouncedInvoke(key: string, fn: () => void, ms = REFRESH_DEBOUNCE_MS): void {
   const existing = debounceTimers[key];
   if (existing) clearTimeout(existing);
@@ -113,6 +117,29 @@ function withSupportedSubtitleMode(
   if (!env || env.subtitleBurnAvailable) return settings;
   if (settings.subtitleMode !== "burned") return settings;
   return { ...settings, subtitleMode: "external" };
+}
+
+function translationSummaryFromDoc(doc: TranslationDoc): TranslationSummary {
+  let translatedCount = 0;
+  let editedCount = 0;
+  for (const segment of doc.segments) {
+    if (segment.translation.trim()) translatedCount += 1;
+    if (segment.edited) editedCount += 1;
+  }
+  return {
+    sourceLanguage: doc.sourceLanguage,
+    targetLanguage: doc.targetLanguage,
+    model: doc.model,
+    promptVersion: doc.promptVersion,
+    segmentCount: doc.segments.length,
+    translatedCount,
+    editedCount,
+    cacheKey: doc.cacheKey,
+    transcriptCacheKey: doc.transcriptCacheKey,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+    relativePath: "translation/translation.json",
+  };
 }
 
 // Phase 11 — per-stage auto-unload timers. `scheduleStageUnload`
@@ -148,6 +175,26 @@ function scheduleStageUnload(stage: string, settings: AppSettings | null): void 
       console.warn(`stage unload ${stage} failed`, err);
     });
   }, grace * 1000);
+}
+
+async function unloadIdleStage(
+  stage: string,
+  state: Pick<AppState, "jobsById" | "settings">,
+): Promise<void> {
+  // Respect the user's explicit "keep models resident" choice.
+  if (state.settings?.autoUnloadAfterSecs == null) return;
+  const active = Object.values(state.jobsById).some(
+    (job) =>
+      job.stage === stage &&
+      (job.status === "queued" || job.status === "running"),
+  );
+  if (active) return;
+  cancelStageUnload(stage);
+  try {
+    await api.unloadStageModels(stage);
+  } catch (err) {
+    console.warn(`releasing idle ${stage} model failed`, err);
+  }
 }
 
 interface AppState {
@@ -190,7 +237,6 @@ interface AppState {
   translationRecommendedPresets: TranslationRecommendedPreset[];
   translationRecommendedLoading: boolean;
   currentTranslationDoc: TranslationDoc | null;
-  currentTranslationLoading: boolean;
 
   // Phase 5: subtitle editor
   currentSubtitleDoc: SubtitleDoc | null;
@@ -205,7 +251,6 @@ interface AppState {
   ttsRecommendedVoices: TtsRecommendedVoicePreset[];
   ttsRecommendedLoading: boolean;
   currentTtsManifest: TtsManifest | null;
-  currentTtsManifestLoading: boolean;
   ttsEngine: string;
   ttsVoiceId: string;
   ttsSettings: TtsSettings;
@@ -214,21 +259,18 @@ interface AppState {
   // Phase 7: voice synchronisation
   syncEnv: SyncEnv | null;
   currentSyncManifest: SyncManifest | null;
-  currentSyncManifestLoading: boolean;
   syncSettings: SyncSettings;
   lastSyncPreview: PreviewSyncResult | null;
 
   // Phase 8: audio mixing
   mixEnv: MixEnv | null;
   currentMixManifest: MixManifest | null;
-  currentMixManifestLoading: boolean;
   mixSettings: MixSettings;
   lastMixPreview: PreviewMixResult | null;
 
   // Phase 9: final video rendering
   renderEnv: RenderEnv | null;
   currentRenderManifest: RenderManifest | null;
-  currentRenderManifestLoading: boolean;
   renderSettings: RenderSettings;
 
   // Phase 10: local model manager
@@ -243,7 +285,6 @@ interface AppState {
   openProject: (id: string) => Promise<Project>;
   deleteProject: (id: string) => Promise<void>;
   updateSettings: (patch: AppSettingsPatch) => Promise<void>;
-  pingWorker: () => Promise<void>;
   refreshFfmpeg: () => Promise<FfmpegAvailability>;
 
   // Phase 2
@@ -428,7 +469,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   translationRecommendedPresets: [],
   translationRecommendedLoading: false,
   currentTranslationDoc: null,
-  currentTranslationLoading: false,
 
   currentSubtitleDoc: null,
   currentSubtitleLoading: false,
@@ -439,7 +479,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   ttsRecommendedVoices: [],
   ttsRecommendedLoading: false,
   currentTtsManifest: null,
-  currentTtsManifestLoading: false,
   ttsEngine: "piper",
   ttsVoiceId: "",
   ttsSettings: defaultTtsSettings(),
@@ -447,19 +486,16 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   syncEnv: null,
   currentSyncManifest: null,
-  currentSyncManifestLoading: false,
   syncSettings: defaultSyncSettings(),
   lastSyncPreview: null,
 
   mixEnv: null,
   currentMixManifest: null,
-  currentMixManifestLoading: false,
   mixSettings: defaultMixSettings(),
   lastMixPreview: null,
 
   renderEnv: null,
   currentRenderManifest: null,
-  currentRenderManifestLoading: false,
   renderSettings: defaultRenderSettings(),
 
   localModels: [],
@@ -468,6 +504,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   modelImportBusy: false,
 
   bootstrap: async () => {
+    // React StrictMode invokes mount effects twice in development. Keep
+    // bootstrap idempotent so it cannot register duplicate Tauri event
+    // listeners or duplicate every progress/terminal update.
+    if (bootstrapStarted || get().bootReady) return;
+    bootstrapStarted = true;
     try {
       const [appInfo, settings, projects, workerStatus, ffmpeg] =
         await Promise.all([
@@ -489,6 +530,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       const [progUnlisten, updUnlisten, chunkUnlisten, ttsUnlisten, syncUnlisten] =
         await Promise.all([
           onJobProgress((evt) => {
+            const now = Date.now();
+            const last = progressLastCommitted.get(evt.id) ?? 0;
+            if (
+              evt.progress < 1 &&
+              now - last < PROGRESS_UI_INTERVAL_MS
+            ) {
+              return;
+            }
+            progressLastCommitted.set(evt.id, now);
             set((state) => ({
               jobProgress: { ...state.jobProgress, [evt.id]: evt.progress },
             }));
@@ -518,6 +568,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 snap.status === "cancelled"
               ) {
                 delete jobProgress[snap.id];
+                progressLastCommitted.delete(snap.id);
                 // If this is the current project's job, refresh media so the
                 // UI picks up new audio/transcript/translation manifests.
                 if (
@@ -581,12 +632,28 @@ export const useAppStore = create<AppState>((set, get) => ({
             ) {
               return;
             }
-            // Incremental refresh — debounced so a burst of chunk
-            // notifications (small chunk_size on a long movie can
-            // fire dozens per second) coalesces into ~3 IPC calls.
+            // Update the cheap counters from the event itself. Loading
+            // the translation doc is still debounced, but do not call
+            // get_project_media here: that command also collects every
+            // downstream summary and used to launch ffprobe repeatedly
+            // throughout a long translation job.
+            set((current) => {
+              const media = current.currentMedia;
+              const summary = media?.translation;
+              if (!media || !summary) return {};
+              return {
+                currentMedia: {
+                  ...media,
+                  translation: {
+                    ...summary,
+                    translatedCount: evt.translatedCount,
+                    segmentCount: evt.segmentCount,
+                  },
+                },
+              };
+            });
             debouncedInvoke(`translation:${evt.projectId}`, () => {
               void get().loadTranslationDoc(evt.projectId);
-              void get().refreshMedia(evt.projectId);
             });
           }),
           onTtsSegmentCompleted((evt) => {
@@ -691,11 +758,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if ("ffmpegPath" in patch || "ffprobePath" in patch) {
       await get().refreshFfmpeg();
     }
-  },
-
-  pingWorker: async () => {
-    const status = await api.workerStatus();
-    set({ worker: status });
   },
 
   refreshFfmpeg: async () => {
@@ -869,17 +931,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadTranslationDoc: async (projectId) => {
-    set({ currentTranslationLoading: true });
-    try {
-      const doc = await api.getProjectTranslationDoc(projectId);
-      set({ currentTranslationDoc: doc });
-      return doc;
-    } finally {
-      set({ currentTranslationLoading: false });
-    }
+    const doc = await api.getProjectTranslationDoc(projectId);
+    set((state) => ({
+      currentTranslationDoc: doc,
+      currentMedia:
+        doc && state.currentMedia
+          ? {
+              ...state.currentMedia,
+              translation: translationSummaryFromDoc(doc),
+            }
+          : state.currentMedia,
+    }));
+    return doc;
   },
 
   startTranslate: async (projectId, options) => {
+    // A completed large-v3 transcription can otherwise overlap in RAM
+    // with the GGUF model for the full idle grace period.
+    await unloadIdleStage("transcribe", get());
     const start = await api.translate(projectId, options);
     // Phase 10 — persist per-project translation model choice.
     void get()
@@ -904,7 +973,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   updateTranslationSegment: async (projectId, segmentId, translation) => {
-    await api.updateTranslationSegment(projectId, segmentId, translation);
+    const summary = await api.updateTranslationSegment(
+      projectId,
+      segmentId,
+      translation,
+    );
     // Optimistically patch the doc in memory so the input isn't
     // debounced by another refresh round-trip.
     set((state) => {
@@ -915,10 +988,13 @@ export const useAppStore = create<AppState>((set, get) => ({
           ? { ...s, translation, edited: true }
           : s,
       );
-      return { currentTranslationDoc: { ...doc, segments } };
+      return {
+        currentTranslationDoc: { ...doc, segments },
+        currentMedia: state.currentMedia
+          ? { ...state.currentMedia, translation: summary }
+          : state.currentMedia,
+      };
     });
-    // Refresh the summary so panel counters (edited/translated) update.
-    await get().refreshMedia(projectId);
   },
 
   loadSubtitles: async (projectId) => {
@@ -1051,14 +1127,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadTtsManifest: async (projectId) => {
-    set({ currentTtsManifestLoading: true });
-    try {
-      const manifest = await api.getProjectTtsManifest(projectId);
-      set({ currentTtsManifest: manifest });
-      return manifest;
-    } finally {
-      set({ currentTtsManifestLoading: false });
-    }
+    const manifest = await api.getProjectTtsManifest(projectId);
+    set({ currentTtsManifest: manifest });
+    return manifest;
   },
 
   refreshTtsSummary: async (projectId) => {
@@ -1117,6 +1188,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   startGenerateTts: async (projectId, mode) => {
     const state = get();
+    // TTS does not need the Whisper or translation model. Release idle
+    // predecessors before loading the voice to avoid cross-stage peaks.
+    await unloadIdleStage("transcribe", state);
+    await unloadIdleStage("translate", get());
     const start = await api.generateTts(projectId, {
       engine: state.ttsEngine,
       defaultVoiceId: state.ttsVoiceId,
@@ -1159,14 +1234,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadSyncManifest: async (projectId) => {
-    set({ currentSyncManifestLoading: true });
-    try {
-      const manifest = await api.getProjectSyncManifest(projectId);
-      set({ currentSyncManifest: manifest });
-      return manifest;
-    } finally {
-      set({ currentSyncManifestLoading: false });
-    }
+    const manifest = await api.getProjectSyncManifest(projectId);
+    set({ currentSyncManifest: manifest });
+    return manifest;
   },
 
   refreshSyncSummary: async (projectId) => {
@@ -1235,19 +1305,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadMixManifest: async (projectId) => {
-    set({ currentMixManifestLoading: true });
-    try {
-      const manifest = await api.getProjectMixManifest(projectId);
-      set({ currentMixManifest: manifest });
-      // Keep the sliders in sync with what was last generated so the
-      // UI doesn't show stale defaults after a project reopen.
-      if (manifest?.settings) {
-        set({ mixSettings: manifest.settings });
-      }
-      return manifest;
-    } finally {
-      set({ currentMixManifestLoading: false });
+    const manifest = await api.getProjectMixManifest(projectId);
+    set({ currentMixManifest: manifest });
+    // Keep the sliders in sync with what was last generated so the
+    // UI doesn't show stale defaults after a project reopen.
+    if (manifest?.settings) {
+      set({ mixSettings: manifest.settings });
     }
+    return manifest;
   },
 
   refreshMixSummary: async (projectId) => {
@@ -1322,22 +1387,20 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadRenderManifest: async (projectId) => {
-    set({ currentRenderManifestLoading: true });
-    try {
-      const manifest = await api.getProjectRenderManifest(projectId);
-      set({ currentRenderManifest: manifest });
-      // Keep the panel controls in sync with what was last generated
-      // so a project reopen doesn't wipe the user's settings back to
-      // the defaults.
-      if (manifest?.settings) {
-        set((s) => ({
-          renderSettings: withSupportedSubtitleMode(manifest.settings, s.renderEnv),
-        }));
-      }
-      return manifest;
-    } finally {
-      set({ currentRenderManifestLoading: false });
+    const manifest = await api.getProjectRenderManifest(projectId);
+    set({ currentRenderManifest: manifest });
+    // Keep the panel controls in sync with what was last generated
+    // so a project reopen doesn't wipe the user's settings back to
+    // the defaults.
+    if (manifest?.settings) {
+      set((s) => ({
+        renderSettings: withSupportedSubtitleMode(
+          manifest.settings,
+          s.renderEnv,
+        ),
+      }));
     }
+    return manifest;
   },
 
   refreshRenderSummary: async (projectId) => {

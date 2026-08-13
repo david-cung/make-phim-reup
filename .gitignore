@@ -30,10 +30,10 @@ __pycache__/
 Thumbs.db
 
 # App runtime
-logs/
+/logs/
 *.log
-data/
-projects/
+/data/
+/projects/
 
 # IDE
 .vscode/

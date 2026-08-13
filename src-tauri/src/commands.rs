@@ -20,7 +20,7 @@ use crate::integrations::youtube::{
     YouTubePublishingHistoryEntry, YouTubeThumbnailResult, YouTubeUploadSnapshot,
     YouTubeVideoMetadata,
 };
-use crate::jobs::{JobSnapshot, JobStage, JobsRepo};
+use crate::jobs::{JobSnapshot, JobsRepo};
 use crate::mix::{
     MixEnv, MixGenerateStart, MixManifest, MixRequest, MixSettings, MixSummary, PreviewMixResult,
 };
@@ -1590,9 +1590,6 @@ pub async fn list_youtube_history(
         .youtube
         .list_history(&PathBuf::from(project.root_path))?)
 }
-
-#[allow(dead_code)]
-fn _use_stage(_: JobStage) {}
 
 /// Phase 11 — cheap "did the file move?" check that reuses the
 /// fingerprint the importer wrote to `ProjectRecord`. Only if the

@@ -1,9 +1,10 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import Dashboard from "./screens/Dashboard";
-import ProjectView from "./screens/Project";
-import Settings from "./screens/Settings";
 import { useAppStore } from "./state/store";
+
+const ProjectView = lazy(() => import("./screens/Project"));
+const Settings = lazy(() => import("./screens/Settings"));
 
 // UI redesign — the App shell is intentionally minimal now.
 //
@@ -44,11 +45,21 @@ export default function App() {
   }
 
   return (
-    <Routes>
-      <Route path="/" element={<Dashboard />} />
-      <Route path="/projects/:id" element={<ProjectView />} />
-      <Route path="/settings" element={<Settings />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <Suspense
+      fallback={
+        <div className="app-shell">
+          <div className="loading" style={{ margin: "auto" }}>
+            Loading workspace…
+          </div>
+        </div>
+      }
+    >
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/projects/:id" element={<ProjectView />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
   );
 }

@@ -122,7 +122,7 @@ impl AppState {
             jobs.clone(),
             worker_sup.clone(),
         );
-        let subtitles = SubtitleService::new(db.clone(), projects.clone());
+        let subtitles = SubtitleService::new(projects.clone());
         let tts = TtsService::new(
             app.clone(),
             db.clone(),

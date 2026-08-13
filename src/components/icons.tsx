@@ -108,25 +108,6 @@ export const IconPause = (p: IconProps) => (
   </svg>
 );
 
-export const IconVolume = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="M3 10v4h4l5 4V6L7 10H3ZM16 8a5 5 0 0 1 0 8M19 5a9 9 0 0 1 0 14" />
-  </svg>
-);
-
-export const IconFullscreen = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
-  </svg>
-);
-
-export const IconSearch = (p: IconProps) => (
-  <svg {...base(p)}>
-    <circle cx="11" cy="11" r="7" />
-    <path d="m20 20-3.5-3.5" />
-  </svg>
-);
-
 export const IconPlus = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M12 5v14M5 12h14" />
@@ -139,21 +120,9 @@ export const IconChevronLeft = (p: IconProps) => (
   </svg>
 );
 
-export const IconChevronDown = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="m6 9 6 6 6-6" />
-  </svg>
-);
-
 export const IconClose = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M6 6l12 12M18 6 6 18" />
-  </svg>
-);
-
-export const IconCheck = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="m5 12 5 5 9-11" />
   </svg>
 );
 
@@ -190,34 +159,8 @@ export const IconZoomOut = (p: IconProps) => (
   </svg>
 );
 
-export const IconInfo = (p: IconProps) => (
-  <svg {...base(p)}>
-    <circle cx="12" cy="12" r="9" />
-    <path d="M12 8h.01M11 12h1v5h1" />
-  </svg>
-);
-
-export const IconAlert = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="m12 3 10 18H2L12 3Z" />
-    <path d="M12 9v5M12 17.5h.01" />
-  </svg>
-);
-
 export const IconFolder = (p: IconProps) => (
   <svg {...base(p)}>
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
-  </svg>
-);
-
-export const IconRefresh = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" />
-  </svg>
-);
-
-export const IconDownload = (p: IconProps) => (
-  <svg {...base(p)}>
-    <path d="M12 3v14M6 13l6 6 6-6M5 21h14" />
   </svg>
 );

@@ -1,15 +1,9 @@
 """FFmpeg wrapper for Phase 7 sync application.
 
 Given a source TTS WAV and a :class:`SyncPlan`, produce the
-timing-adjusted WAV on disk. We stay on top of a *single* FFmpeg
-subprocess per segment because:
-
-* the source files are typically well under a megabyte, so per-invoke
-  overhead is negligible;
-* it maps cleanly to per-segment cancellation (kill the child on
-  request);
-* it lets us keep the pipeline description short enough to reason
-  about in a single ``-af`` filter chain.
+timing-adjusted WAV on disk. PCM16 clips that already fit are copied
+and padded with the stdlib ``wave`` module. FFmpeg is reserved for
+clips that need atempo, resampling, or channel conversion.
 
 Nothing about the *movie* soundtrack is touched here — that's Phase 8
 mixing. This stage only reshapes per-segment WAVs.
@@ -94,16 +88,28 @@ def apply_plan(
                 RpcErrorCode.SYNC_SOURCE_MISSING,
                 f"source TTS wav not found or empty: {source_wav}",
             )
-        _run_ffmpeg(
-            ffmpeg_bin=ffmpeg_bin,
-            source_wav=source_wav,
-            output_wav=output_wav,
-            plan=plan,
-            out_sr=out_sr,
-            out_channels=out_channels,
-            cancel_event=cancel_event,
-            timeout_secs=timeout_secs,
+        copied = (
+            plan.status == SYNC_STATUS_FITS
+            and _copy_and_pad_pcm16(
+                source_wav,
+                output_wav,
+                target_duration_secs=plan.target_duration_secs,
+                sample_rate=out_sr,
+                channels=out_channels,
+                cancel_event=cancel_event,
+            )
         )
+        if not copied:
+            _run_ffmpeg(
+                ffmpeg_bin=ffmpeg_bin,
+                source_wav=source_wav,
+                output_wav=output_wav,
+                plan=plan,
+                out_sr=out_sr,
+                out_channels=out_channels,
+                cancel_event=cancel_event,
+                timeout_secs=timeout_secs,
+            )
 
     if not output_wav.is_file() or output_wav.stat().st_size == 0:
         raise SyncApplyError(
@@ -186,6 +192,8 @@ def _run_ffmpeg(
         ) from e
 
     stderr_bytes = b""
+    timeout_limit = timeout_secs
+    timeout_remaining = timeout_secs
     try:
         while True:
             try:
@@ -205,17 +213,17 @@ def _run_ffmpeg(
                         RpcErrorCode.CANCELLED,
                         "sync cancelled by user",
                     )
-                if timeout_secs > 0 and proc.poll() is None:
+                if timeout_remaining > 0 and proc.poll() is None:
                     # Keep going; timeout is a soft ceiling per segment
                     # and communicate() will eventually raise again if
                     # we exceed it.
-                    timeout_secs -= 0.25
-                    if timeout_secs <= 0:
+                    timeout_remaining -= 0.25
+                    if timeout_remaining <= 0:
                         proc.kill()
                         proc.wait(timeout=2.0)
                         raise SyncApplyError(
                             RpcErrorCode.SYNC_ENGINE_FAILURE,
-                            f"ffmpeg timed out after {timeout_secs:.1f}s (segment)",
+                            f"ffmpeg timed out after {timeout_limit:.1f}s (segment)",
                         )
     finally:
         if proc.poll() is None:
@@ -277,12 +285,89 @@ def _write_silence_wav(
 ) -> None:
     frames = max(0, int(round(duration_secs * sample_rate)))
     bytes_per_sample = 2  # PCM16
-    silence = b"\x00" * (frames * channels * bytes_per_sample)
     with wave.open(str(path), "wb") as w:
         w.setnchannels(int(channels))
         w.setsampwidth(bytes_per_sample)
         w.setframerate(int(sample_rate))
-        w.writeframes(silence)
+        _write_silence_frames(
+            w,
+            frames=frames,
+            channels=channels,
+            bytes_per_sample=bytes_per_sample,
+        )
+
+
+def _copy_and_pad_pcm16(
+    source: Path,
+    destination: Path,
+    *,
+    target_duration_secs: float,
+    sample_rate: int,
+    channels: int,
+    cancel_event: Optional[threading.Event],
+) -> bool:
+    """Copy a matching PCM16 WAV and append silence without FFmpeg.
+
+    Returns ``False`` when resampling/channel conversion is required.
+    The caller then uses the regular FFmpeg path.
+    """
+    try:
+        with wave.open(str(source), "rb") as reader:
+            if (
+                reader.getsampwidth() != 2
+                or reader.getframerate() != int(sample_rate)
+                or reader.getnchannels() != int(channels)
+                or reader.getcomptype() != "NONE"
+            ):
+                return False
+
+            source_frames = reader.getnframes()
+            target_frames = max(
+                source_frames,
+                int(round(max(0.0, target_duration_secs) * sample_rate)),
+            )
+            with wave.open(str(destination), "wb") as writer:
+                writer.setnchannels(int(channels))
+                writer.setsampwidth(2)
+                writer.setframerate(int(sample_rate))
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise SyncApplyError(
+                            RpcErrorCode.CANCELLED,
+                            "sync cancelled by user",
+                        )
+                    chunk = reader.readframes(32_768)
+                    if not chunk:
+                        break
+                    writer.writeframesraw(chunk)
+                _write_silence_frames(
+                    writer,
+                    frames=target_frames - source_frames,
+                    channels=channels,
+                    bytes_per_sample=2,
+                )
+        return True
+    except SyncApplyError:
+        destination.unlink(missing_ok=True)
+        raise
+    except (OSError, wave.Error):
+        destination.unlink(missing_ok=True)
+        return False
+
+
+def _write_silence_frames(
+    writer: wave.Wave_write,
+    *,
+    frames: int,
+    channels: int,
+    bytes_per_sample: int,
+) -> None:
+    bytes_remaining = max(0, frames) * channels * bytes_per_sample
+    zero_chunk = b"\x00" * min(65_536, max(1, bytes_remaining))
+    while bytes_remaining > 0:
+        chunk_size = min(bytes_remaining, len(zero_chunk))
+        writer.writeframesraw(zero_chunk[:chunk_size])
+        bytes_remaining -= chunk_size
 
 
 def _probe_source_rate(path: Path) -> int:

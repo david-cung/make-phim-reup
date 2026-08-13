@@ -8,6 +8,7 @@ import {
   pickSubtitleSavePath,
 } from "@/ipc/bridge";
 import { useAppStore } from "@/state/store";
+import { humanBytes } from "@/utils/format";
 import { TopBar } from "../components/TopBar";
 import { YouTubePanel } from "../components/YouTubePanel";
 import {
@@ -58,6 +59,7 @@ import {
   type SubtitleSummary,
   type SyncEnv,
   type SyncManifest,
+  type SyncSegmentEntry,
   type SyncSettings,
   type SyncSummary,
   type TranscriptSummary,
@@ -70,6 +72,7 @@ import {
   type TtsEnv,
   type TtsManifest,
   type TtsRecommendedVoicePreset,
+  type TtsSegmentEntry,
   type TtsSettings,
   type TtsSummary,
   type VideoMetadata,
@@ -322,6 +325,7 @@ export default function ProjectView() {
   const startApplyRender = useAppStore((s) => s.startApplyRender);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const environmentRefreshStartedRef = useRef(false);
   const [videoTime, setVideoTime] = useState(0);
   const seekVideo = useCallback((time: number) => {
     const el = videoRef.current;
@@ -361,29 +365,45 @@ export default function ProjectView() {
   }, [id, openProject]);
 
   useEffect(() => {
-    // Best-effort: worker may not be up on first mount.
-    void refreshSttEnv();
-    void refreshWhisperModels();
-    void refreshTranslationEnv();
-    void refreshTranslationModels();
-    void refreshTranslationRecommendedPresets();
-    void refreshTtsEnv();
-    void refreshTtsVoices();
-    void refreshTtsRecommendedVoices();
-    void refreshSyncEnv();
-    void refreshMixEnv();
-    void refreshRenderEnv();
+    if (environmentRefreshStartedRef.current) return;
+    environmentRefreshStartedRef.current = true;
+    // Environment/model inventories are process-wide, not project-wide.
+    // Reuse snapshots already held by the store when navigating between
+    // Settings and projects; each panel still exposes an explicit rescan.
+    if (!sttEnv) {
+      void refreshSttEnv();
+      void refreshWhisperModels();
+    }
+    if (!translationEnv) {
+      void refreshTranslationEnv();
+      void refreshTranslationModels();
+      void refreshTranslationRecommendedPresets();
+    }
+    if (!ttsEnv) {
+      void refreshTtsEnv();
+      void refreshTtsVoices();
+      void refreshTtsRecommendedVoices();
+    }
+    if (!syncEnv) void refreshSyncEnv();
+    if (!mixEnv) void refreshMixEnv();
+    if (!renderEnv) void refreshRenderEnv();
   }, [
+    sttEnv,
     refreshSttEnv,
     refreshWhisperModels,
+    translationEnv,
     refreshTranslationEnv,
     refreshTranslationModels,
     refreshTranslationRecommendedPresets,
+    ttsEnv,
     refreshTtsEnv,
     refreshTtsVoices,
     refreshTtsRecommendedVoices,
+    syncEnv,
     refreshSyncEnv,
+    mixEnv,
     refreshMixEnv,
+    renderEnv,
     refreshRenderEnv,
   ]);
 
@@ -411,27 +431,39 @@ export default function ProjectView() {
   // the "N/M generated" counters reflect the *current* cache identity.
   useEffect(() => {
     if (!id) return;
-    void refreshTtsSummary(id);
+    const timer = window.setTimeout(() => {
+      void refreshTtsSummary(id);
+    }, 300);
+    return () => window.clearTimeout(timer);
   }, [id, ttsEngine, ttsVoiceId, ttsSettings, refreshTtsSummary]);
 
   // Same for sync settings — coverage counts depend on min/max speed.
   useEffect(() => {
     if (!id) return;
-    void refreshSyncSummary(id);
+    const timer = window.setTimeout(() => {
+      void refreshSyncSummary(id);
+    }, 300);
+    return () => window.clearTimeout(timer);
   }, [id, syncSettings, refreshSyncSummary]);
 
   // And for mix settings — status (Ready/Stale/Missing) depends on
   // volume + ducking, since those feed into the cache key.
   useEffect(() => {
     if (!id) return;
-    void refreshMixSummary(id);
+    const timer = window.setTimeout(() => {
+      void refreshMixSummary(id);
+    }, 300);
+    return () => window.clearTimeout(timer);
   }, [id, mixSettings, refreshMixSummary]);
 
   // Render settings feed into the cache key too — subtitle mode,
   // output format and codecs all move the Ready/Stale/Missing needle.
   useEffect(() => {
     if (!id) return;
-    void refreshRenderSummary(id);
+    const timer = window.setTimeout(() => {
+      void refreshRenderSummary(id);
+    }, 300);
+    return () => window.clearTimeout(timer);
   }, [id, renderSettings, refreshRenderSummary]);
 
   useEffect(() => {
@@ -644,14 +676,30 @@ export default function ProjectView() {
   const [pipelineStep, setPipelineStep] = useState<string | null>(null);
   const pipelineAbortRef = useRef(false);
 
-  // When the video reaches a new subtitle line we quietly follow it in
-  // the inspector so the user always sees context for the current
-  // playhead position. Explicit selections (clicking a row) win.
-  const activeSubtitleIdFromTime = useMemo(
-    () => findActiveSubtitleId(subtitleDoc, videoTime),
+  const subtitleById = useMemo(
+    () =>
+      new Map(
+        (subtitleDoc?.segments ?? []).map((segment) => [segment.id, segment]),
+      ),
+    [subtitleDoc],
+  );
+
+  // Resolve the playhead once. The old render path linearly scanned the
+  // same subtitle array for the overlay, inspector, and editor.
+  const activeSubtitleFromTime = useMemo(
+    () => findSubtitleAtTime(subtitleDoc, videoTime),
     [subtitleDoc, videoTime],
   );
-  const effectiveSubtitleId = selectedSubtitleId ?? activeSubtitleIdFromTime;
+  const effectiveSubtitleId =
+    selectedSubtitleId ?? activeSubtitleFromTime?.id ?? null;
+  const handleSelectSubtitle = useCallback(
+    (subtitleId: number) => {
+      setSelectedSubtitleId(subtitleId);
+      const segment = subtitleById.get(subtitleId);
+      if (segment) seekVideo(segment.start);
+    },
+    [seekVideo, subtitleById],
+  );
 
   const sourceMediaPath = project?.sourceMediaPath ?? null;
 
@@ -1877,11 +1925,7 @@ export default function ProjectView() {
               selectedSubtitleId={effectiveSubtitleId}
               onImport={() => void handleImport(false)}
               onImportCopy={() => void handleImport(true)}
-              onSelectSubtitle={(sid) => {
-                setSelectedSubtitleId(sid);
-                const seg = subtitleDoc?.segments.find((s) => s.id === sid);
-                if (seg) seekVideo(seg.start);
-              }}
+              onSelectSubtitle={handleSelectSubtitle}
               workflow={workflow}
             />
           </div>
@@ -1909,7 +1953,9 @@ export default function ProjectView() {
                     overlayText={
                       showingResult
                         ? null
-                        : findCurrentSubtitleText(subtitleDoc, videoTime)
+                        : activeSubtitleFromTime?.translatedText ||
+                          activeSubtitleFromTime?.sourceText ||
+                          null
                     }
                   />
                 ) : null}
@@ -2265,11 +2311,7 @@ export default function ProjectView() {
             hasAudio={!!media?.audioAbsolutePath}
             hasVoice={(media?.tts?.generatedCount ?? 0) > 0}
             selectedSubtitleId={effectiveSubtitleId}
-            onSelectSubtitle={(sid) => {
-              setSelectedSubtitleId(sid);
-              const seg = subtitleDoc?.segments.find((s) => s.id === sid);
-              if (seg) seekVideo(seg.start);
-            }}
+            onSelectSubtitle={handleSelectSubtitle}
           />
         </div>
 
@@ -2615,6 +2657,7 @@ function StageToolbar(props: {
 // clickable clips. The clips are best-effort — they show the shape of
 // the media without touching the underlying editing pipeline.
 // -------------------------------------------------------------------------
+const EMPTY_SUBTITLE_SEGMENTS: SubtitleSegment[] = [];
 
 function Timeline(props: {
   durationSecs: number | null;
@@ -2627,6 +2670,7 @@ function Timeline(props: {
   onSelectSubtitle: (id: number) => void;
 }) {
   const [pxPerSec, setPxPerSec] = useState(24);
+  const [viewport, setViewport] = useState({ left: 0, width: 1200 });
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const duration = props.durationSecs ?? 0;
   const totalW = Math.max(duration * pxPerSec, 320);
@@ -2638,6 +2682,34 @@ function Timeline(props: {
     const x = e.clientX - rect.left + scroll;
     props.onSeek(Math.max(0, x / pxPerSec));
   };
+
+  useEffect(() => {
+    const element = canvasRef.current;
+    if (!element) return;
+    const updateWidth = () =>
+      setViewport((current) => {
+        const width = Math.max(1, element.clientWidth);
+        return Math.abs(current.width - width) < 1
+          ? current
+          : { ...current, width };
+      });
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleScroll = useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      const left = event.currentTarget.scrollLeft;
+      setViewport((current) =>
+        Math.abs(current.left - left) < Math.max(100, current.width / 4)
+          ? current
+          : { ...current, left },
+      );
+    },
+    [],
+  );
 
   // Keep the playhead in view as it advances.
   useEffect(() => {
@@ -2653,14 +2725,93 @@ function Timeline(props: {
     const out: { at: number; major: boolean; label: string }[] = [];
     if (!duration) return out;
     const step = pickTickStep(pxPerSec);
-    for (let t = 0; t <= duration + 0.01; t += step) {
+    const overscanSecs = viewport.width / pxPerSec;
+    const visibleStart = Math.max(
+      0,
+      (viewport.left - viewport.width) / pxPerSec,
+    );
+    const visibleEnd = Math.min(
+      duration,
+      (viewport.left + viewport.width * 2) / pxPerSec,
+    );
+    const firstTick = Math.floor(visibleStart / step) * step;
+    for (let t = firstTick; t <= visibleEnd + overscanSecs * 0.01; t += step) {
       const major = Math.round(t) % (step * 5) === 0;
       out.push({ at: t, major, label: formatTimecodeShort(t) });
     }
     return out;
-  }, [pxPerSec, duration]);
+  }, [pxPerSec, duration, viewport]);
 
-  const segments = props.subtitleDoc?.segments ?? [];
+  const segments = props.subtitleDoc?.segments ?? EMPTY_SUBTITLE_SEGMENTS;
+  const visibleSegments = useMemo(() => {
+    const visibleStart = Math.max(
+      0,
+      (viewport.left - viewport.width) / pxPerSec,
+    );
+    const visibleEnd =
+      (viewport.left + viewport.width * 2) / Math.max(1, pxPerSec);
+    return segments.filter(
+      (segment) =>
+        segment.end >= visibleStart && segment.start <= visibleEnd,
+    );
+  }, [pxPerSec, segments, viewport]);
+  const voiceClips = useMemo(() => {
+    if (!props.hasVoice || !duration) return null;
+    return visibleSegments.map((segment) => (
+      <div
+        key={segment.id}
+        className={`track-clip voice${
+          props.selectedSubtitleId === segment.id ? " selected" : ""
+        }`}
+        style={{
+          left: segment.start * pxPerSec,
+          width: Math.max(2, (segment.end - segment.start) * pxPerSec),
+        }}
+        onClick={(event) => {
+          event.stopPropagation();
+          props.onSelectSubtitle(segment.id);
+        }}
+        title={segment.translatedText || segment.sourceText || ""}
+      >
+        {segment.translatedText || segment.sourceText || "voice"}
+      </div>
+    ));
+  }, [
+    duration,
+    props.hasVoice,
+    props.onSelectSubtitle,
+    props.selectedSubtitleId,
+    pxPerSec,
+    visibleSegments,
+  ]);
+  const subtitleClips = useMemo(
+    () =>
+      visibleSegments.map((segment) => (
+        <div
+          key={segment.id}
+          className={`track-clip subtitle${
+            props.selectedSubtitleId === segment.id ? " selected" : ""
+          }`}
+          style={{
+            left: segment.start * pxPerSec,
+            width: Math.max(2, (segment.end - segment.start) * pxPerSec),
+          }}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onSelectSubtitle(segment.id);
+          }}
+          title={segment.translatedText || segment.sourceText || ""}
+        >
+          {segment.translatedText || segment.sourceText || "…"}
+        </div>
+      )),
+    [
+      props.onSelectSubtitle,
+      props.selectedSubtitleId,
+      pxPerSec,
+      visibleSegments,
+    ],
+  );
 
   return (
     <div className="timeline on-canvas" aria-label="Timeline">
@@ -2702,7 +2853,12 @@ function Timeline(props: {
             <span className="tag-name">S1</span> Subtitle
           </div>
         </div>
-        <div className="tracks-canvas" ref={canvasRef} onClick={handleClick}>
+        <div
+          className="tracks-canvas"
+          ref={canvasRef}
+          onClick={handleClick}
+          onScroll={handleScroll}
+        >
           <div style={{ width: totalW, position: "relative" }}>
             <div className="ruler" style={{ width: totalW }}>
               {ticks.map((t, i) => (
@@ -2739,49 +2895,9 @@ function Timeline(props: {
                 ) : null}
               </div>
               <div className="track-lane">
-                {props.hasVoice && duration
-                  ? segments.map((s) => (
-                      <div
-                        key={s.id}
-                        className={`track-clip voice${
-                          props.selectedSubtitleId === s.id ? " selected" : ""
-                        }`}
-                        style={{
-                          left: s.start * pxPerSec,
-                          width: Math.max(2, (s.end - s.start) * pxPerSec),
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          props.onSelectSubtitle(s.id);
-                        }}
-                        title={s.translatedText || s.sourceText || ""}
-                      >
-                        {s.translatedText || s.sourceText || "voice"}
-                      </div>
-                    ))
-                  : null}
+                {voiceClips}
               </div>
-              <div className="track-lane">
-                {segments.map((s) => (
-                  <div
-                    key={s.id}
-                    className={`track-clip subtitle${
-                      props.selectedSubtitleId === s.id ? " selected" : ""
-                    }`}
-                    style={{
-                      left: s.start * pxPerSec,
-                      width: Math.max(2, (s.end - s.start) * pxPerSec),
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      props.onSelectSubtitle(s.id);
-                    }}
-                    title={s.translatedText || s.sourceText || ""}
-                  >
-                    {s.translatedText || s.sourceText || "…"}
-                  </div>
-                ))}
-              </div>
+              <div className="track-lane">{subtitleClips}</div>
             </div>
             <div
               className="playhead"
@@ -4260,6 +4376,16 @@ function SubtitlePanel(props: {
     () => findActiveSubtitleId(doc, currentTime),
     [doc, currentTime],
   );
+  const segments = doc?.segments ?? EMPTY_SUBTITLE_SEGMENTS;
+  const filtered = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    if (!query) return segments;
+    return segments.filter((segment) =>
+      `${segment.sourceText}\n${segment.translatedText}\n${segment.dubbingText ?? ""}`
+        .toLowerCase()
+        .includes(query),
+    );
+  }, [filter, segments]);
 
   if (!doc && !summary) {
     if (!hasTranscript) {
@@ -4296,14 +4422,6 @@ function SubtitlePanel(props: {
   const dirty = doc?.dirty ??
     summary?.dirty ?? { tts: false, sync: false, mix: false, render: false };
   const anyDirty = dirty.tts || dirty.sync || dirty.mix || dirty.render;
-  const segments = doc?.segments ?? [];
-  const filtered = filter
-    ? segments.filter((s) =>
-        `${s.sourceText}\n${s.translatedText}`
-          .toLowerCase()
-          .includes(filter.toLowerCase()),
-      )
-    : segments;
 
   return (
     <div className="subtitle-panel">
@@ -4470,6 +4588,26 @@ function SubtitleList(props: {
   } = props;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const ttsBySegment = useMemo(
+    () =>
+      new Map(
+        (ttsManifest?.segments ?? []).map((entry) => [
+          entry.segmentId,
+          entry,
+        ]),
+      ),
+    [ttsManifest],
+  );
+  const syncBySegment = useMemo(
+    () =>
+      new Map(
+        (syncManifest?.segments ?? []).map((entry) => [
+          entry.segmentId,
+          entry,
+        ]),
+      ),
+    [syncManifest],
+  );
 
   const totalHeight = segments.length * SUBTITLE_ROW_HEIGHT;
   const startIndex = Math.max(
@@ -4527,7 +4665,7 @@ function SubtitleList(props: {
                 voices={voices}
                 ttsStatus={computeTtsStatus(
                   seg,
-                  ttsManifest,
+                  ttsBySegment.get(seg.id) ?? null,
                   ttsEngine,
                   ttsVoiceId,
                   ttsSettings,
@@ -4536,6 +4674,7 @@ function SubtitleList(props: {
                 onTtsRegenerate={onTtsRegenerate}
                 syncStatus={computeSyncStatus(
                   seg,
+                  syncBySegment.get(seg.id) ?? null,
                   syncManifest,
                   syncSettings,
                 )}
@@ -4818,7 +4957,7 @@ type TtsRowStatus = {
 
 function computeTtsStatus(
   seg: SubtitleSegment,
-  manifest: TtsManifest | null,
+  entry: TtsSegmentEntry | null,
   engine: string,
   defaultVoiceId: string,
   settings: TtsSettings,
@@ -4844,7 +4983,6 @@ function computeTtsStatus(
       durationSecs: null,
     };
   }
-  const entry = manifest?.segments.find((s) => s.segmentId === seg.id);
   if (!entry) {
     return {
       state: "missing",
@@ -4890,11 +5028,11 @@ type SyncRowStatus = {
  */
 function computeSyncStatus(
   seg: SubtitleSegment,
+  entry: SyncSegmentEntry | null,
   manifest: SyncManifest | null,
   settings: SyncSettings,
 ): SyncRowStatus {
   const targetDuration = Math.max(0, seg.end - seg.start);
-  const entry = manifest?.segments.find((s) => s.segmentId === seg.id);
   if (!entry) {
     return {
       state: "missing",
@@ -6013,23 +6151,33 @@ function TtsPanel(props: {
   );
 }
 
-function findCurrentSubtitleText(
+function findSubtitleAtTime(
   doc: SubtitleDoc | null,
   time: number,
-): string | null {
-  if (!doc) return null;
-  const seg = doc.segments.find((s) => time >= s.start && time < s.end);
-  if (!seg) return null;
-  return seg.translatedText || seg.sourceText || null;
+): SubtitleSegment | null {
+  const segments = doc?.segments;
+  if (!segments?.length) return null;
+
+  // Subtitle documents are kept sorted by start time by the Rust
+  // service. Find the last cue whose start is at/before the playhead
+  // instead of scanning every preceding cue on each timeupdate.
+  let low = 0;
+  let high = segments.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (segments[middle].start <= time) low = middle + 1;
+    else high = middle;
+  }
+  if (low === 0) return null;
+  const candidate = segments[low - 1];
+  return time < candidate.end ? candidate : null;
 }
 
 function findActiveSubtitleId(
   doc: SubtitleDoc | null,
   time: number,
 ): number | null {
-  if (!doc) return null;
-  const seg = doc.segments.find((s) => time >= s.start && time < s.end);
-  return seg?.id ?? null;
+  return findSubtitleAtTime(doc, time)?.id ?? null;
 }
 
 /** `HH:MM:SS.ms` — human-readable timecode (SRT-like separator). */
@@ -6088,18 +6236,6 @@ function formatError(err: unknown): string {
     return e.hint ? `${e.message}\n\nHint: ${e.hint}` : e.message;
   }
   return err instanceof Error ? err.message : JSON.stringify(err);
-}
-
-function humanBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = n / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
 }
 
 function formatDuration(seconds: number): string {

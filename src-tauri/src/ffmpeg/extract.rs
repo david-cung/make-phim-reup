@@ -232,7 +232,7 @@ async fn collect_stderr(stderr: tokio::process::ChildStderr, tx: watch::Sender<S
     let _ = tx.send(buf);
 }
 
-async fn terminate_child(child: &mut Child, pid: Option<u32>) {
+pub(crate) async fn terminate_child(child: &mut Child, pid: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = pid {
         // Ask ffmpeg politely; it finalises the current frame and exits.
@@ -241,7 +241,15 @@ async fn terminate_child(child: &mut Child, pid: Option<u32>) {
         }
     }
     #[cfg(not(unix))]
-    let _ = pid;
+    {
+        let _ = pid;
+        // Windows has no SIGTERM equivalent for this child handle. Kill
+        // immediately instead of waiting for a grace period during which
+        // FFmpeg would continue consuming CPU and writing output.
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return;
+    }
 
     // Give it a short grace period; then kill for real.
     match timeout(Duration::from_millis(2_000), child.wait()).await {

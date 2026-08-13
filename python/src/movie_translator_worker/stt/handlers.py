@@ -84,13 +84,14 @@ def _provider() -> SpeechToTextProvider:
 
 def stt_env(_params: dict[str, Any]) -> dict[str, Any]:
     devices = detect_devices()
+    hardware = memory_stats()
     return {
         "devices": [d.to_dict() for d in devices],
         "defaultDevice": default_device(devices),
         "whisperInstalled": _whisper_installed(),
         "modelsRoot": str(_models_root()),
-        "hardware": memory_stats(),
-        "largeV3": large_v3_capability(),
+        "hardware": hardware,
+        "largeV3": large_v3_capability(mem=hardware, devices=devices),
         "profiles": {
             "fast": profile_params("fast"),
             "balanced": profile_params("balanced"),

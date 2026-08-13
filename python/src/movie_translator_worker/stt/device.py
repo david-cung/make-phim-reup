@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import platform
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from typing import Optional
 
 
@@ -34,6 +35,11 @@ def detect_devices() -> list[DeviceInfo]:
     as *unsupported* on Apple Silicon so the UI can indicate the
     future capability without letting the user pick it today.
     """
+    return list(_detect_devices_cached())
+
+
+@lru_cache(maxsize=1)
+def _detect_devices_cached() -> tuple[DeviceInfo, ...]:
     devices: list[DeviceInfo] = [
         DeviceInfo(kind="cpu", label="CPU", supported=True, detail=platform.machine()),
     ]
@@ -54,7 +60,7 @@ def detect_devices() -> list[DeviceInfo]:
             ),
         )
 
-    return devices
+    return tuple(devices)
 
 
 def default_device(devices: Optional[list[DeviceInfo]] = None) -> str:

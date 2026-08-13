@@ -453,8 +453,7 @@ impl MixService {
         let wait_res = tokio::select! {
             biased;
             _ = cancel.wait() => {
-                terminate_child_pid(pid).await;
-                let _ = child.wait().await;
+                crate::ffmpeg::extract::terminate_child(&mut child, pid).await;
                 let _ = progress_task.await;
                 let _ = stderr_task.await;
                 // Best-effort partial cleanup.
@@ -873,17 +872,6 @@ fn probe_wav_metadata(path: &Path) -> std::io::Result<(f64, u32, u32)> {
         0.0
     };
     Ok((duration, sample_rate, channels))
-}
-
-async fn terminate_child_pid(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid {
-        unsafe {
-            let _ = libc::kill(pid as i32, libc::SIGTERM);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
 }
 
 fn is_disk_full(stderr: &str) -> bool {

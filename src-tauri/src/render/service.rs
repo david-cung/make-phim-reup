@@ -54,8 +54,8 @@ use super::cache::{
 use super::errors::RenderError;
 use super::ffmpeg_cmd::build_render_command;
 use super::models::{
-    build_render_cache_key, OutputFormat, RenderEntry, RenderEnv, RenderGenerateStart,
-    RenderManifest, RenderRequest, RenderSettings, RenderStatus, RenderSummary, SubtitleMode,
+    build_render_cache_key, RenderEntry, RenderEnv, RenderGenerateStart, RenderManifest,
+    RenderRequest, RenderSettings, RenderStatus, RenderSummary, SubtitleMode,
 };
 
 const PROGRESS_EMIT_MIN_INTERVAL_MS: u128 = 100;
@@ -507,8 +507,7 @@ impl RenderService {
         let wait_res = tokio::select! {
             biased;
             _ = cancel.wait() => {
-                terminate_child_pid(pid).await;
-                let _ = child.wait().await;
+                crate::ffmpeg::extract::terminate_child(&mut child, pid).await;
                 let _ = progress_task.await;
                 let _ = stderr_task.await;
                 let _ = std::fs::remove_file(&output_path);
@@ -973,17 +972,6 @@ pub(crate) fn build_summary(
     }
 }
 
-async fn terminate_child_pid(pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = pid {
-        unsafe {
-            let _ = libc::kill(pid as i32, libc::SIGTERM);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = pid;
-}
-
 fn is_disk_full(stderr: &str) -> bool {
     stderr.to_lowercase().contains("no space left on device")
 }
@@ -993,7 +981,3 @@ fn tail_lines(text: &str, max_lines: usize) -> String {
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].join(" | ")
 }
-
-// Consumed to silence unused-import in edge cases.
-#[allow(dead_code)]
-fn _use_format(_: OutputFormat) {}

@@ -49,7 +49,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../python/src/movie_translator_worker/**/*"
+      "../python/src/movie_translator_worker/**/*.py"
     ],
     "externalBin": [],
     "copyright": "Copyright © 2026 Local Movie Translator contributors",

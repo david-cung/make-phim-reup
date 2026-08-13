@@ -1,16 +1,14 @@
 //! Host-side orchestration for the subtitle editor.
 //!
-//! All mutations are async (`self.db.run(...)` for DB, atomic writes
-//! for the JSON file) and grab a per-service mutex around the on-disk
-//! `subtitles.json` before load-modify-save so overlapping requests
-//! from the UI can't race and lose an edit.
+//! All mutations use atomic writes for the JSON file and grab a
+//! per-service mutex around the on-disk `subtitles.json` before
+//! load-modify-save so overlapping requests cannot lose an edit.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use crate::db::DbHandle;
 use crate::projects::{ProjectError, ProjectService};
 use crate::stt::TranscriptCacheFile;
 use crate::translation::TranslationCacheFile;
@@ -28,8 +26,6 @@ use super::srt;
 /// A tiny wrapper struct so callers get one Arc that owns the whole
 /// subtitle capability.
 pub struct SubtitleService {
-    #[allow(dead_code)]
-    db: DbHandle,
     projects: Arc<ProjectService>,
     /// Serialise load-modify-save cycles per project. A single global
     /// mutex is fine — subtitle mutations are fast, and the UI never
@@ -38,9 +34,8 @@ pub struct SubtitleService {
 }
 
 impl SubtitleService {
-    pub fn new(db: DbHandle, projects: Arc<ProjectService>) -> Arc<Self> {
+    pub fn new(projects: Arc<ProjectService>) -> Arc<Self> {
         Arc::new(Self {
-            db,
             projects,
             doc_lock: Arc::new(Mutex::new(())),
         })

@@ -8,6 +8,7 @@ tests that don't touch the provider don't pay the cost.
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +56,7 @@ class FasterWhisperProvider(SpeechToTextProvider):
         # release CTranslate2's native tensors.
         self._loaded_model = None
         self._loaded_key = None
+        gc.collect()
         return True
 
     # ---------------------------------------------------------- SpeechToTextProvider
