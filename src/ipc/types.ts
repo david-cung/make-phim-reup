@@ -672,12 +672,19 @@ export interface TtsSettings {
   speed: number;
   pitch: number;
   volume: number;
+  device: "auto" | "cpu" | "cuda" | "mps";
 }
 
 export function defaultTtsSettings(
   overrides: Partial<TtsSettings> = {},
 ): TtsSettings {
-  return { speed: 1.0, pitch: 0.0, volume: 1.0, ...overrides };
+  return {
+    speed: 1.0,
+    pitch: 0.0,
+    volume: 1.0,
+    device: "auto",
+    ...overrides,
+  };
 }
 
 export interface TtsEngineInfo {
@@ -685,6 +692,36 @@ export interface TtsEngineInfo {
   name: string;
   available: boolean;
   supportedSettings: string[];
+  license?: string | null;
+  commercialUse?: boolean | null;
+}
+
+export interface F5TtsModelInfo {
+  id: string;
+  engine: string;
+  name: string;
+  installed: boolean;
+  status: "ready" | "installed" | "not_installed" | "loading" | "error";
+  path: string;
+  source: string;
+  version: string;
+  license: string;
+  commercialUse: boolean;
+  approxSizeBytes: number;
+}
+
+export interface F5TtsHardwareInfo {
+  backend: string;
+  cudaAvailable: boolean;
+  mpsAvailable: boolean;
+  gpuName?: string | null;
+  vramGb?: number | null;
+  ramTotalGb?: number | null;
+  ramAvailableGb?: number | null;
+  os: string;
+  recommended: boolean;
+  warning?: string | null;
+  runtimeError?: string | null;
 }
 
 export interface TtsEnv {
@@ -692,6 +729,9 @@ export interface TtsEnv {
   modelsRoot: string;
   ttsRoot: string;
   piperInstalled: boolean;
+  f5RuntimeInstalled: boolean;
+  f5Model: F5TtsModelInfo;
+  f5Hardware: F5TtsHardwareInfo;
   defaultEngine: string;
 }
 
@@ -707,6 +747,16 @@ export interface VoiceInfo {
   installed: boolean;
   quality?: string | null;
   supportedSettings: string[];
+  referenceAudioPath?: string | null;
+  referenceText?: string | null;
+  modelName?: string | null;
+  modelVersion?: string | null;
+  modelSource?: string | null;
+  license?: string | null;
+  commercialUse?: boolean | null;
+  cacheIdentity?: string | null;
+  emotion?: string | null;
+  style?: string | null;
 }
 
 // Phase 12 — one entry from the app's curated Piper voice
@@ -725,6 +775,18 @@ export interface TtsRecommendedVoicePreset {
   approxSizeBytes: number;
   label: string;
   isDefault: boolean;
+  license?: string | null;
+  commercialUse?: boolean | null;
+}
+
+export interface CreateTtsVoiceProfileRequest {
+  id: string;
+  name: string;
+  gender: "male" | "female" | "neutral" | "unknown";
+  referenceAudioPath: string;
+  referenceText: string;
+  emotion?: string | null;
+  style?: string | null;
 }
 
 export interface TtsSegmentEntry {
@@ -743,6 +805,7 @@ export interface TtsSegmentEntry {
   speed: number;
   pitch: number;
   volume: number;
+  device: "auto" | "cpu" | "cuda" | "mps";
   file: string;
   durationSecs: number;
   sampleRate: number;
@@ -804,6 +867,15 @@ export interface TtsSegmentCompletedEvent {
   file: string;
   generatedCount: number;
   subtitleCount: number;
+}
+
+export interface TtsProgressDetailEvent {
+  jobId: string;
+  projectId: string;
+  stage: "preparing" | "loading_model" | "generating_voice" | "completed" | string;
+  completedSegments: number;
+  totalSegments: number;
+  currentSegmentId?: number | null;
 }
 
 // ---------- Phase 7 additions (Voice synchronisation) ----------

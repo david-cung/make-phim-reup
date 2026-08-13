@@ -6,6 +6,7 @@ import {
   onJobUpdate,
   onSyncSegmentCompleted,
   onTranslationChunkCompleted,
+  onTtsProgressDetail,
   onTtsSegmentCompleted,
   onWorkerStatus,
 } from "@/ipc/bridge";
@@ -14,6 +15,7 @@ import type {
   AppSettings,
   AppSettingsPatch,
   CreateProjectInput,
+  CreateTtsVoiceProfileRequest,
   ExportKind,
   ExportSubtitlesResult,
   FfmpegAvailability,
@@ -62,6 +64,7 @@ import type {
   TranslationSummary,
   TtsEnv,
   TtsManifest,
+  TtsProgressDetailEvent,
   TtsRecommendedVoicePreset,
   TtsSettings,
   TtsSummary,
@@ -216,6 +219,7 @@ interface AppState {
 
   /** Live progress per job id (0..1). Removed on terminal update. */
   jobProgress: Record<string, number>;
+  ttsProgressDetailByJob: Record<string, TtsProgressDetailEvent>;
   /** Latest snapshot per job id. */
   jobsById: Record<string, JobSnapshot>;
 
@@ -252,6 +256,7 @@ interface AppState {
   ttsRecommendedLoading: boolean;
   currentTtsManifest: TtsManifest | null;
   ttsEngine: string;
+  ttsQualityMode: "fast" | "balanced" | "quality";
   ttsVoiceId: string;
   ttsSettings: TtsSettings;
   lastTtsPreview: PreviewResult | null;
@@ -328,6 +333,11 @@ interface AppState {
     segmentId: number,
     patch: SubtitleSegmentPatch,
   ) => Promise<SubtitleDoc>;
+  assignSubtitleVoiceToSpeaker: (
+    projectId: string,
+    speaker: string,
+    voiceId: string | null,
+  ) => Promise<SubtitleDoc>;
   addSubtitleSegment: (
     projectId: string,
     afterId: number | null,
@@ -363,9 +373,13 @@ interface AppState {
   refreshTtsVoices: () => Promise<VoiceInfo[]>;
   refreshTtsRecommendedVoices: () => Promise<TtsRecommendedVoicePreset[]>;
   downloadTtsVoice: (preset: string) => Promise<void>;
+  createTtsVoiceProfile: (
+    request: CreateTtsVoiceProfileRequest,
+  ) => Promise<VoiceInfo>;
   loadTtsManifest: (projectId: string) => Promise<TtsManifest | null>;
   refreshTtsSummary: (projectId: string) => Promise<TtsSummary | null>;
   setTtsEngine: (engine: string) => void;
+  setTtsQualityMode: (mode: "fast" | "balanced" | "quality") => void;
   setTtsVoiceId: (voiceId: string) => void;
   setTtsSettings: (settings: Partial<TtsSettings>) => void;
   previewTts: (
@@ -452,6 +466,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ffmpeg: null,
 
   jobProgress: {},
+  ttsProgressDetailByJob: {},
   jobsById: {},
 
   workerUnlisten: null,
@@ -480,6 +495,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ttsRecommendedLoading: false,
   currentTtsManifest: null,
   ttsEngine: "piper",
+  ttsQualityMode: "fast",
   ttsVoiceId: "",
   ttsSettings: defaultTtsSettings(),
   lastTtsPreview: null,
@@ -527,7 +543,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
 
       // Combined listener disposer for job events.
-      const [progUnlisten, updUnlisten, chunkUnlisten, ttsUnlisten, syncUnlisten] =
+      const [
+        progUnlisten,
+        updUnlisten,
+        chunkUnlisten,
+        ttsUnlisten,
+        ttsProgressUnlisten,
+        syncUnlisten,
+      ] =
         await Promise.all([
           onJobProgress((evt) => {
             const now = Date.now();
@@ -562,13 +585,22 @@ export const useAppStore = create<AppState>((set, get) => ({
             set((state) => {
               const jobsById = { ...state.jobsById, [snap.id]: snap };
               const jobProgress = { ...state.jobProgress };
+              const ttsProgressDetailByJob = {
+                ...state.ttsProgressDetailByJob,
+              };
               if (
                 snap.status === "completed" ||
                 snap.status === "failed" ||
                 snap.status === "cancelled"
               ) {
                 delete jobProgress[snap.id];
+                delete ttsProgressDetailByJob[snap.id];
                 progressLastCommitted.delete(snap.id);
+                if (snap.stage === "tts" && !snap.projectId) {
+                  void get().refreshTtsEnv();
+                  void get().refreshTtsVoices();
+                  void get().refreshTtsRecommendedVoices();
+                }
                 // If this is the current project's job, refresh media so the
                 // UI picks up new audio/transcript/translation manifests.
                 if (
@@ -621,7 +653,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                   }
                 }
               }
-              return { jobsById, jobProgress };
+              return { jobsById, jobProgress, ttsProgressDetailByJob };
             });
           }),
           onTranslationChunkCompleted((evt) => {
@@ -668,6 +700,14 @@ export const useAppStore = create<AppState>((set, get) => ({
               void get().loadTtsManifest(evt.projectId);
             });
           }),
+          onTtsProgressDetail((evt) => {
+            set((state) => ({
+              ttsProgressDetailByJob: {
+                ...state.ttsProgressDetailByJob,
+                [evt.jobId]: evt,
+              },
+            }));
+          }),
           onSyncSegmentCompleted((evt) => {
             const state = get();
             if (
@@ -686,6 +726,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         updUnlisten();
         chunkUnlisten();
         ttsUnlisten();
+        ttsProgressUnlisten();
         syncUnlisten();
       };
 
@@ -732,7 +773,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     try {
       const project = await api.openProject(id);
-      set({ currentProject: project });
+      const ttsEngine = project.ttsEngine || "piper";
+      set({
+        currentProject: project,
+        ttsEngine,
+        ttsQualityMode:
+          ttsEngine === "f5-vietnamese" ? "quality" : "fast",
+        ttsVoiceId: project.ttsVoiceId || "",
+      });
       // Kick off media load in the background — cheap enough to await here
       // so the caller sees the fully-populated screen when we resolve.
       await get().refreshMedia(id);
@@ -1023,6 +1071,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     return doc;
   },
 
+  assignSubtitleVoiceToSpeaker: async (projectId, speaker, voiceId) => {
+    const doc = await api.assignSubtitleVoiceToSpeaker(
+      projectId,
+      speaker,
+      voiceId,
+    );
+    set({ currentSubtitleDoc: doc });
+    void get().refreshMedia(projectId);
+    return doc;
+  },
+
   addSubtitleSegment: async (projectId, afterId, start, end) => {
     const doc = await api.addSubtitleSegment(projectId, afterId, start, end);
     set({ currentSubtitleDoc: doc });
@@ -1087,9 +1146,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // the user hasn't picked one yet.
       const state = get();
       if (!state.ttsVoiceId && voices.length > 0) {
-        const first =
-          voices.find((v) => v.engine === state.ttsEngine) ?? voices[0];
-        set({ ttsVoiceId: first.id, ttsEngine: first.engine });
+        const first = voices.find((v) => v.engine === state.ttsEngine);
+        if (first) set({ ttsVoiceId: first.id });
       }
       return voices;
     } catch (err) {
@@ -1126,6 +1184,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
+  createTtsVoiceProfile: async (request) => {
+    const voice = await api.createTtsVoiceProfile(request);
+    const voices = await get().refreshTtsVoices();
+    const installed = voices.find((candidate) => candidate.id === voice.id) ?? voice;
+    set({
+      ttsEngine: installed.engine,
+      ttsQualityMode: "quality",
+      ttsVoiceId: installed.id,
+    });
+    return installed;
+  },
+
   loadTtsManifest: async (projectId) => {
     const manifest = await api.getProjectTtsManifest(projectId);
     set({ currentTtsManifest: manifest });
@@ -1153,7 +1223,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setTtsEngine: (engine) => {
-    set({ ttsEngine: engine });
+    set({
+      ttsEngine: engine,
+      ttsQualityMode: engine === "f5-vietnamese" ? "quality" : "fast",
+    });
     // Re-select the first voice on this engine so we never leave the
     // UI pointing at an invalid combination.
     const state = get();
@@ -1161,6 +1234,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       const fallback = state.ttsVoices.find((v) => v.engine === engine);
       set({ ttsVoiceId: fallback?.id ?? "" });
     }
+  },
+
+  setTtsQualityMode: (mode) => {
+    const engine = mode === "quality" ? "f5-vietnamese" : "piper";
+    get().setTtsEngine(engine);
+    set((state) => ({
+      ttsQualityMode: mode,
+      ttsSettings:
+        mode === "quality" && state.ttsSettings.speed > 1.12
+          ? { ...state.ttsSettings, speed: 1.12 }
+          : state.ttsSettings,
+    }));
   },
 
   setTtsVoiceId: (voiceId) => set({ ttsVoiceId: voiceId }),

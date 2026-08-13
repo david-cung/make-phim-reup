@@ -55,6 +55,7 @@ fn entry(id: u32, text: &str, voice: &str, engine: &str, settings: TtsSettings) 
         speed: settings.speed,
         pitch: settings.pitch,
         volume: settings.volume,
+        device: settings.device,
         file: format!("voices/{:06}.wav", id),
         duration_secs: 1.0,
         sample_rate: 22050,
@@ -182,6 +183,7 @@ fn settings_normalisation_clamps_ranges() {
         speed: 100.0,
         pitch: -100.0,
         volume: -1.0,
+        ..Default::default()
     }
     .normalised();
     assert!((s.speed - 4.0).abs() < 1e-6);

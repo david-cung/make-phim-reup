@@ -1501,6 +1501,21 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .sync-grid select, .sync-grid input,
 .mix-grid select, .mix-grid input,
 .render-grid select, .render-grid input { width: 100%; }
+.tts-grid textarea { width: 100%; min-height: 84px; resize: vertical; }
+.tts-reference-text { grid-column: 1 / -1; }
+.tts-advanced { display: flex; flex-direction: column; gap: var(--sp-3); }
+.path-row { display: flex; align-items: center; gap: var(--sp-2); }
+.path-row input { min-width: 0; flex: 1; }
+.path-row .btn { flex: 0 0 auto; }
+.tts-character-map {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+}
+.tts-character-map select { min-width: 220px; }
 
 .stt-profiles {
   display: flex;

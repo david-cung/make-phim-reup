@@ -11,7 +11,7 @@ import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Optional
 
-TTS_CACHE_SCHEMA_VERSION = 1
+TTS_CACHE_SCHEMA_VERSION = 2
 
 
 # --------------------------------------------------------------------- voices
@@ -38,6 +38,16 @@ class VoiceInfo:
     installed: bool
     quality: Optional[str] = None  # engine-specific quality/tier tag
     supported_settings: list[str] = field(default_factory=list)
+    reference_audio_path: Optional[str] = None
+    reference_text: Optional[str] = None
+    model_name: Optional[str] = None
+    model_version: Optional[str] = None
+    model_source: Optional[str] = None
+    license: Optional[str] = None
+    commercial_use: Optional[bool] = None
+    cache_identity: Optional[str] = None
+    emotion: Optional[str] = None
+    style: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -45,6 +55,13 @@ class VoiceInfo:
         payload["configPath"] = payload.pop("config_path")
         payload["sampleRate"] = payload.pop("sample_rate")
         payload["supportedSettings"] = payload.pop("supported_settings")
+        payload["referenceAudioPath"] = payload.pop("reference_audio_path")
+        payload["referenceText"] = payload.pop("reference_text")
+        payload["modelName"] = payload.pop("model_name")
+        payload["modelVersion"] = payload.pop("model_version")
+        payload["modelSource"] = payload.pop("model_source")
+        payload["commercialUse"] = payload.pop("commercial_use")
+        payload["cacheIdentity"] = payload.pop("cache_identity")
         return payload
 
 
@@ -64,16 +81,23 @@ class TTSSettings:
     speed: float = 1.0
     pitch: float = 0.0
     volume: float = 1.0
+    device: str = "auto"
 
     def normalised(self) -> "TTSSettings":
         return TTSSettings(
             speed=_clamp(float(self.speed), 0.25, 4.0),
             pitch=_clamp(float(self.pitch), -12.0, 12.0),
             volume=_clamp(float(self.volume), 0.0, 4.0),
+            device=_normalise_device(self.device),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"speed": self.speed, "pitch": self.pitch, "volume": self.volume}
+        return {
+            "speed": self.speed,
+            "pitch": self.pitch,
+            "volume": self.volume,
+            "device": self.device,
+        }
 
     @classmethod
     def from_dict(cls, payload: Optional[dict[str, Any]]) -> "TTSSettings":
@@ -84,6 +108,7 @@ class TTSSettings:
                 speed=float(payload.get("speed", 1.0)),
                 pitch=float(payload.get("pitch", 0.0)),
                 volume=float(payload.get("volume", 1.0)),
+                device=str(payload.get("device", "auto")),
             ).normalised()
         except (TypeError, ValueError):
             return cls()
@@ -91,6 +116,11 @@ class TTSSettings:
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
+
+
+def _normalise_device(value: str) -> str:
+    device = (value or "auto").strip().lower()
+    return device if device in {"auto", "cpu", "cuda", "mps"} else "auto"
 
 
 # ------------------------------------------------------------------- results
@@ -164,6 +194,7 @@ def build_segment_cache_key(
     model_name: str,
     text: str,
     settings: TTSSettings,
+    voice_identity: str = "",
 ) -> str:
     """Deterministic hash over everything that changes the generated WAV.
 
@@ -179,6 +210,8 @@ def build_segment_cache_key(
         f"speed={s.speed:.4f}",
         f"pitch={s.pitch:.4f}",
         f"volume={s.volume:.4f}",
+        f"device={s.device}",
+        f"voiceIdentity={voice_identity}",
         "text=" + text,
     ]
     digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()

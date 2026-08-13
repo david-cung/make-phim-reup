@@ -6,6 +6,7 @@ import {
   pickRenderOutputPath,
   pickSubtitleFile,
   pickSubtitleSavePath,
+  pickTtsReferenceAudio,
 } from "@/ipc/bridge";
 import { useAppStore } from "@/state/store";
 import { humanBytes } from "@/utils/format";
@@ -215,6 +216,9 @@ export default function ProjectView() {
   const mediaLoading = useAppStore((s) => s.currentMediaLoading);
   const ffmpeg = useAppStore((s) => s.ffmpeg);
   const jobProgress = useAppStore((s) => s.jobProgress);
+  const ttsProgressDetailByJob = useAppStore(
+    (s) => s.ttsProgressDetailByJob,
+  );
   const jobsById = useAppStore((s) => s.jobsById);
   const importMedia = useAppStore((s) => s.importMedia);
   const extractAudio = useAppStore((s) => s.extractAudio);
@@ -262,6 +266,9 @@ export default function ProjectView() {
   const loadSubtitles = useAppStore((s) => s.loadSubtitles);
   const rebuildSubtitles = useAppStore((s) => s.rebuildSubtitles);
   const updateSubtitleSegment = useAppStore((s) => s.updateSubtitleSegment);
+  const assignSubtitleVoiceToSpeaker = useAppStore(
+    (s) => s.assignSubtitleVoiceToSpeaker,
+  );
   const addSubtitleSegment = useAppStore((s) => s.addSubtitleSegment);
   const deleteSubtitleSegment = useAppStore((s) => s.deleteSubtitleSegment);
   const splitSubtitleSegment = useAppStore((s) => s.splitSubtitleSegment);
@@ -273,6 +280,7 @@ export default function ProjectView() {
   const ttsVoices = useAppStore((s) => s.ttsVoices);
   const ttsManifest = useAppStore((s) => s.currentTtsManifest);
   const ttsEngine = useAppStore((s) => s.ttsEngine);
+  const ttsQualityMode = useAppStore((s) => s.ttsQualityMode);
   const ttsVoiceId = useAppStore((s) => s.ttsVoiceId);
   const ttsSettings = useAppStore((s) => s.ttsSettings);
   const lastTtsPreview = useAppStore((s) => s.lastTtsPreview);
@@ -281,6 +289,7 @@ export default function ProjectView() {
   const loadTtsManifest = useAppStore((s) => s.loadTtsManifest);
   const refreshTtsSummary = useAppStore((s) => s.refreshTtsSummary);
   const setTtsEngine = useAppStore((s) => s.setTtsEngine);
+  const setTtsQualityMode = useAppStore((s) => s.setTtsQualityMode);
   const setTtsVoiceId = useAppStore((s) => s.setTtsVoiceId);
   const setTtsSettings = useAppStore((s) => s.setTtsSettings);
   const previewTts = useAppStore((s) => s.previewTts);
@@ -294,6 +303,9 @@ export default function ProjectView() {
     (s) => s.refreshTtsRecommendedVoices,
   );
   const downloadTtsVoice = useAppStore((s) => s.downloadTtsVoice);
+  const createTtsVoiceProfile = useAppStore(
+    (s) => s.createTtsVoiceProfile,
+  );
 
   const syncEnv = useAppStore((s) => s.syncEnv);
   const syncManifest = useAppStore((s) => s.currentSyncManifest);
@@ -1342,14 +1354,40 @@ export default function ProjectView() {
   /// with generation, `false` if the user cancelled or nothing is
   /// installable.
   const ensureTtsVoiceReady = async (): Promise<boolean> => {
-    if (ttsVoiceId && ttsVoices.some((v) => v.id === ttsVoiceId)) {
+    if (
+      ttsVoiceId &&
+      ttsVoices.some((v) => v.id === ttsVoiceId && v.engine === ttsEngine)
+    ) {
       return true;
     }
+    if (ttsVoiceId) {
+      throw new Error(
+        `The selected voice "${ttsVoiceId}" is not installed for ${ttsEngine}. Rescan or choose another voice; it will not be replaced automatically.`,
+      );
+    }
+    if (ttsEngine === "f5-vietnamese") {
+      if (!ttsEnv?.f5RuntimeInstalled) {
+        throw new Error(
+          "F5-TTS runtime is not installed. Run scripts/setup-f5.ps1 first.",
+        );
+      }
+      if (!ttsEnv.f5Model.installed) {
+        throw new Error(
+          "F5-TTS QUALITY model is not installed. Install it explicitly in Voice Over settings.",
+        );
+      }
+      throw new Error(
+        "Create and select an F5 reference voice profile before generating. QUALITY never falls back to Piper automatically.",
+      );
+    }
     const targetLang = (project?.targetLanguage || "vi").toLowerCase();
+    const enginePresets = ttsRecommendedVoices.filter(
+      (candidate) => candidate.engine === ttsEngine,
+    );
     const preset =
-      ttsRecommendedVoices.find((p) => p.targetLanguages.includes(targetLang)) ??
-      ttsRecommendedVoices.find((p) => p.isDefault) ??
-      ttsRecommendedVoices[0];
+      enginePresets.find((p) => p.targetLanguages.includes(targetLang)) ??
+      enginePresets.find((p) => p.isDefault) ??
+      enginePresets[0];
     if (!preset) {
       throw new Error(
         "No TTS voice is installed and no recommended presets are available. Drop a Piper .onnx voice into <models>/tts/piper/ manually.",
@@ -2189,9 +2227,11 @@ export default function ProjectView() {
                           summary={media?.tts ?? null}
                           subtitleDoc={subtitleDoc}
                           engine={ttsEngine}
+                          qualityMode={ttsQualityMode}
                           voiceId={ttsVoiceId}
                           settings={ttsSettings}
                           onEngineChange={setTtsEngine}
+                          onQualityModeChange={setTtsQualityMode}
                           onVoiceChange={setTtsVoiceId}
                           onSettingsChange={setTtsSettings}
                           activeJob={activeTtsJob}
@@ -2199,6 +2239,11 @@ export default function ProjectView() {
                             activeTtsJob
                               ? jobProgress[activeTtsJob.id] ?? 0
                               : 0
+                          }
+                          progressDetail={
+                            activeTtsJob
+                              ? ttsProgressDetailByJob[activeTtsJob.id] ?? null
+                              : null
                           }
                           downloadJob={activeTtsDownloadJob}
                           downloadProgress={
@@ -2211,7 +2256,23 @@ export default function ProjectView() {
                           onGenerateAll={handleTtsGenerateAll}
                           onCancel={handleTtsCancel}
                           onCancelDownload={handleCancelTtsDownload}
-                          onRescanVoices={() => void refreshTtsVoices()}
+                          onRescanVoices={() =>
+                            void Promise.all([
+                              refreshTtsEnv(),
+                              refreshTtsVoices(),
+                            ])
+                          }
+                          onInstallF5={() =>
+                            downloadTtsVoice("f5-vietnamese-vivoice")
+                          }
+                          onCreateVoiceProfile={createTtsVoiceProfile}
+                          onAssignSpeakerVoice={(speaker, voiceId) =>
+                            void assignSubtitleVoiceToSpeaker(
+                              project.id,
+                              speaker,
+                              voiceId,
+                            )
+                          }
                           lastPreview={lastTtsPreview}
                         />
                       </Panel>
@@ -4608,6 +4669,10 @@ function SubtitleList(props: {
       ),
     [syncManifest],
   );
+  const engineVoices = useMemo(
+    () => voices.filter((voice) => voice.engine === ttsEngine),
+    [ttsEngine, voices],
+  );
 
   const totalHeight = segments.length * SUBTITLE_ROW_HEIGHT;
   const startIndex = Math.max(
@@ -4662,7 +4727,7 @@ function SubtitleList(props: {
                 onDelete={onDelete}
                 onSplit={onSplit}
                 onMerge={onMerge}
-                voices={voices}
+                voices={engineVoices}
                 ttsStatus={computeTtsStatus(
                   seg,
                   ttsBySegment.get(seg.id) ?? null,
@@ -4996,7 +5061,16 @@ function computeTtsStatus(
   const speedOk = Math.abs(entry.speed - settings.speed) < 1e-4;
   const pitchOk = Math.abs(entry.pitch - settings.pitch) < 1e-4;
   const volumeOk = Math.abs(entry.volume - settings.volume) < 1e-4;
-  if (textOk && engineOk && voiceOk && speedOk && pitchOk && volumeOk) {
+  const deviceOk = entry.device === settings.device;
+  if (
+    textOk &&
+    engineOk &&
+    voiceOk &&
+    speedOk &&
+    pitchOk &&
+    volumeOk &&
+    deviceOk
+  ) {
     return {
       state: "generated",
       hint: `Cached ${entry.file}`,
@@ -5846,6 +5920,21 @@ function RenderStatusBadge({ status }: { status: RenderSummary["status"] }) {
 
 // ---------------- TTS panel ----------------
 
+function formatTtsProgressStage(stage: string): string {
+  switch (stage) {
+    case "preparing":
+      return "Preparing";
+    case "loading_model":
+      return "Loading model";
+    case "generating_voice":
+      return "Generating voice";
+    case "completed":
+      return "Completed";
+    default:
+      return stage.replaceAll("_", " ");
+  }
+}
+
 function TtsPanel(props: {
   env: TtsEnv | null;
   voices: VoiceInfo[];
@@ -5855,13 +5944,16 @@ function TtsPanel(props: {
   summary: TtsSummary | null;
   subtitleDoc: SubtitleDoc | null;
   engine: string;
+  qualityMode: "fast" | "balanced" | "quality";
   voiceId: string;
   settings: TtsSettings;
   onEngineChange: (engine: string) => void;
+  onQualityModeChange: (mode: "fast" | "balanced" | "quality") => void;
   onVoiceChange: (voiceId: string) => void;
   onSettingsChange: (settings: Partial<TtsSettings>) => void;
   activeJob: JobSnapshot | null;
   progress: number;
+  progressDetail: import("@/ipc/types").TtsProgressDetailEvent | null;
   downloadJob: JobSnapshot | null;
   downloadProgress: number;
   busy: boolean;
@@ -5870,6 +5962,11 @@ function TtsPanel(props: {
   onCancel: () => void;
   onCancelDownload: () => void;
   onRescanVoices: () => void;
+  onInstallF5: () => Promise<void>;
+  onCreateVoiceProfile: (
+    request: import("@/ipc/types").CreateTtsVoiceProfileRequest,
+  ) => Promise<VoiceInfo>;
+  onAssignSpeakerVoice: (speaker: string, voiceId: string | null) => void;
   lastPreview: PreviewResult | null;
 }) {
   const {
@@ -5880,13 +5977,16 @@ function TtsPanel(props: {
     summary,
     subtitleDoc,
     engine,
+    qualityMode,
     voiceId,
     settings,
     onEngineChange,
+    onQualityModeChange,
     onVoiceChange,
     onSettingsChange,
     activeJob,
     progress,
+    progressDetail,
     downloadJob,
     downloadProgress,
     busy,
@@ -5895,8 +5995,22 @@ function TtsPanel(props: {
     onCancel,
     onCancelDownload,
     onRescanVoices,
+    onInstallF5,
+    onCreateVoiceProfile,
+    onAssignSpeakerVoice,
     lastPreview,
   } = props;
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [profileId, setProfileId] = useState("");
+  const [profileName, setProfileName] = useState("");
+  const [profileGender, setProfileGender] = useState<
+    "male" | "female" | "neutral" | "unknown"
+  >("unknown");
+  const [referenceAudioPath, setReferenceAudioPath] = useState("");
+  const [referenceText, setReferenceText] = useState("");
+  const [profileEmotion, setProfileEmotion] = useState("neutral");
+  const [profileStyle, setProfileStyle] = useState("default");
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   const availableEngines = env?.engines ?? [];
   const currentEngineInfo = availableEngines.find((e) => e.id === engine);
@@ -5907,29 +6021,96 @@ function TtsPanel(props: {
     () => voices.filter((v) => v.engine === engine),
     [voices, engine],
   );
+  const selectedVoice = enginesVoices.find((voice) => voice.id === voiceId) ?? null;
+  const speakerMappings = useMemo(() => {
+    const mappings = new Map<
+      string,
+      { count: number; voiceId: string; mixed: boolean }
+    >();
+    for (const segment of subtitleDoc?.segments ?? []) {
+      const speaker = segment.speaker?.trim();
+      if (!speaker) continue;
+      const voice = segment.voiceId ?? "";
+      const current = mappings.get(speaker);
+      if (!current) {
+        mappings.set(speaker, { count: 1, voiceId: voice, mixed: false });
+      } else {
+        current.count += 1;
+        if (current.voiceId !== voice) current.mixed = true;
+      }
+    }
+    return [...mappings.entries()];
+  }, [subtitleDoc]);
   const hasSubtitles = (subtitleDoc?.segments.length ?? 0) > 0;
   // Phase 12 — pick the preset the app will auto-download when the
   // user has nothing installed. Prefer one that speaks the
   // project's target language, then fall back to the default.
+  const enginePresets = recommendedPresets.filter(
+    (preset) => preset.engine === engine,
+  );
   const targetPreset =
-    recommendedPresets.find((p) =>
+    enginePresets.find((p) =>
       p.targetLanguages.includes((targetLanguage || "").toLowerCase()),
     ) ??
-    recommendedPresets.find((p) => p.isDefault) ??
-    recommendedPresets[0] ??
+    enginePresets.find((p) => p.isDefault) ??
+    enginePresets[0] ??
     null;
   const canAutoDownloadVoice =
-    !!targetPreset && !!currentEngineInfo?.available && hasSubtitles;
+    engine === "piper" &&
+    !!targetPreset &&
+    !!currentEngineInfo?.available &&
+    hasSubtitles;
   const willAutoDownloadVoice = !voiceId && canAutoDownloadVoice;
+  const f5Ready =
+    engine !== "f5-vietnamese" ||
+    (!!env?.f5RuntimeInstalled && !!env.f5Model.installed);
   const canGenerate =
     (!!voiceId || willAutoDownloadVoice) &&
     !!currentEngineInfo?.available &&
+    f5Ready &&
     hasSubtitles &&
     !activeJob;
+
+  const handleCreateProfile = async () => {
+    setProfileError(null);
+    try {
+      await onCreateVoiceProfile({
+        id: profileId,
+        name: profileName,
+        gender: profileGender,
+        referenceAudioPath,
+        referenceText,
+        emotion: profileEmotion,
+        style: profileStyle,
+      });
+      setProfileId("");
+      setProfileName("");
+      setReferenceAudioPath("");
+      setReferenceText("");
+    } catch (error) {
+      setProfileError(formatError(error));
+    }
+  };
 
   return (
     <div className="tts-panel">
       <div className="tts-grid">
+        <label>
+          <span>Quality mode</span>
+          <select
+            value={qualityMode}
+            onChange={(event) =>
+              onQualityModeChange(
+                event.target.value as "fast" | "balanced" | "quality",
+              )
+            }
+            disabled={!!activeJob}
+          >
+            <option value="fast">FAST · Piper</option>
+            <option value="balanced">BALANCED · Piper</option>
+            <option value="quality">QUALITY · F5-TTS Vietnamese</option>
+          </select>
+        </label>
         <label>
           <span>Engine</span>
           <select
@@ -5976,12 +6157,31 @@ function TtsPanel(props: {
             ))}
           </select>
         </label>
+        {engine === "f5-vietnamese" && (
+          <label>
+            <span>Compute device</span>
+            <select
+              value={settings.device}
+              onChange={(event) =>
+                onSettingsChange({
+                  device: event.target.value as TtsSettings["device"],
+                })
+              }
+              disabled={!!activeJob}
+            >
+              <option value="auto">Auto ({env?.f5Hardware.backend ?? "detect"})</option>
+              <option value="cuda">CUDA GPU</option>
+              <option value="mps">Apple MPS</option>
+              <option value="cpu">CPU</option>
+            </select>
+          </label>
+        )}
         <label>
           <span>Speed ({settings.speed.toFixed(2)}×)</span>
           <input
             type="range"
-            min={0.5}
-            max={2.0}
+            min={engine === "f5-vietnamese" ? 0.9 : 0.5}
+            max={engine === "f5-vietnamese" ? 1.12 : 2.0}
             step={0.05}
             value={settings.speed}
             disabled={!!activeJob || !supportedSettings.has("speed")}
@@ -6033,6 +6233,247 @@ function TtsPanel(props: {
           <div>
             <span>Piper installed</span>{" "}
             {env.piperInstalled ? "✓" : "no (install piper-tts in the worker env)"}
+          </div>
+          <div>
+            <span>F5 runtime</span>{" "}
+            {env.f5RuntimeInstalled
+              ? "✓"
+              : "not installed (run scripts/setup-f5.ps1)"}
+          </div>
+          <div>
+            <span>F5 model</span>{" "}
+            {env.f5Model.installed
+              ? `✓ ${humanBytes(env.f5Model.approxSizeBytes)}`
+              : "not installed"}
+          </div>
+        </div>
+      )}
+
+      {engine === "f5-vietnamese" && env && (
+        <>
+          <div className="banner banner--warn small">
+            F5-TTS ViVoice is licensed {env.f5Model.license} for
+            non-commercial use. It is not bundled with the app and QUALITY
+            never falls back to Piper.
+          </div>
+          {env.f5Hardware.warning && (
+            <div className="banner banner--warn small">
+              {env.f5Hardware.warning}
+              {env.f5Hardware.gpuName
+                ? ` GPU: ${env.f5Hardware.gpuName}${
+                    env.f5Hardware.vramGb
+                      ? ` (${env.f5Hardware.vramGb} GB VRAM)`
+                      : ""
+                  }.`
+                : ""}
+            </div>
+          )}
+          {!env.f5Model.installed && (
+            <div className="tts-actions">
+              <button
+                className="btn"
+                type="button"
+                disabled={!!downloadJob}
+                onClick={() => {
+                  setProfileError(null);
+                  void onInstallF5().catch((error) =>
+                    setProfileError(formatError(error)),
+                  );
+                }}
+              >
+                Install F5 model ({humanBytes(env.f5Model.approxSizeBytes)})
+              </button>
+              <span className="small muted">
+                Explicit one-time download; inference is offline afterwards.
+              </span>
+            </div>
+          )}
+          {env.f5Model.installed && (
+            <div className="tts-advanced">
+              <button
+                className="btn ghost small"
+                type="button"
+                onClick={() => setAdvancedOpen((value) => !value)}
+              >
+                {advancedOpen ? "Hide advanced" : "Advanced · reference voice"}
+              </button>
+              {advancedOpen && (
+                <div className="tts-grid">
+                  <label>
+                    <span>Profile ID</span>
+                    <input
+                      value={profileId}
+                      placeholder="character-01"
+                      onChange={(event) => setProfileId(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Display name</span>
+                    <input
+                      value={profileName}
+                      placeholder="Vietnamese Male 01"
+                      onChange={(event) => setProfileName(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Gender</span>
+                    <select
+                      value={profileGender}
+                      onChange={(event) =>
+                        setProfileGender(
+                          event.target.value as typeof profileGender,
+                        )
+                      }
+                    >
+                      <option value="unknown">Unspecified</option>
+                      <option value="male">Male</option>
+                      <option value="female">Female</option>
+                      <option value="neutral">Neutral</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Emotion metadata</span>
+                    <select
+                      value={profileEmotion}
+                      onChange={(event) =>
+                        setProfileEmotion(event.target.value)
+                      }
+                    >
+                      {[
+                        "neutral",
+                        "happy",
+                        "sad",
+                        "angry",
+                        "afraid",
+                        "surprised",
+                        "serious",
+                        "excited",
+                        "calm",
+                        "whisper",
+                      ].map((emotion) => (
+                        <option key={emotion} value={emotion}>
+                          {emotion}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Style metadata</span>
+                    <input
+                      value={profileStyle}
+                      placeholder="default"
+                      onChange={(event) => setProfileStyle(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    <span>Reference WAV</span>
+                    <div className="path-row">
+                      <input value={referenceAudioPath} readOnly />
+                      <button
+                        className="btn ghost small"
+                        type="button"
+                        onClick={() => {
+                          void pickTtsReferenceAudio().then((path) => {
+                            if (path) setReferenceAudioPath(path);
+                          });
+                        }}
+                      >
+                        Browse
+                      </button>
+                    </div>
+                  </label>
+                  <label className="tts-reference-text">
+                    <span>Exact reference transcript</span>
+                    <textarea
+                      value={referenceText}
+                      placeholder="Transcript matching the reference WAV exactly…"
+                      onChange={(event) => setReferenceText(event.target.value)}
+                    />
+                  </label>
+                  <div className="tts-actions">
+                    <button
+                      className="btn"
+                      type="button"
+                      disabled={
+                        !profileId.trim() ||
+                        !profileName.trim() ||
+                        !referenceAudioPath ||
+                        !referenceText.trim()
+                      }
+                      onClick={() => void handleCreateProfile()}
+                    >
+                      Create local voice profile
+                    </button>
+                  </div>
+                  <div className="small muted tts-reference-text">
+                    ViVoice does not expose reliable emotion or pitch controls;
+                    these fields are stored as metadata for future local
+                    providers and are not simulated with extreme speed changes.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {profileError && (
+            <div className="banner banner--warn small">{profileError}</div>
+          )}
+        </>
+      )}
+
+      {speakerMappings.length > 0 && (
+        <div className="tts-character-map">
+          <div className="small muted">
+            Character mapping · assignments apply to every subtitle with the
+            same speaker.
+          </div>
+          {speakerMappings.map(([speaker, mapping]) => (
+            <label className="kv-row" key={speaker}>
+              <span>
+                {speaker} <small>({mapping.count} lines)</small>
+              </span>
+              <select
+                value={mapping.mixed ? "__mixed__" : mapping.voiceId}
+                disabled={!!activeJob}
+                onChange={(event) =>
+                  onAssignSpeakerVoice(
+                    speaker,
+                    event.target.value ? event.target.value : null,
+                  )
+                }
+              >
+                {mapping.mixed && (
+                  <option value="__mixed__" disabled>
+                    Mixed voices
+                  </option>
+                )}
+                <option value="">Project default voice</option>
+                {enginesVoices.map((voice) => (
+                  <option key={voice.id} value={voice.id}>
+                    {voice.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+      )}
+
+      {selectedVoice?.engine === "f5-vietnamese" && (
+        <div className="tts-env small">
+          <div>
+            <span>Reference audio</span>{" "}
+            <code className="mono small">
+              {selectedVoice.referenceAudioPath}
+            </code>
+          </div>
+          <div>
+            <span>Model</span>{" "}
+            {selectedVoice.modelName} · {selectedVoice.license}
+          </div>
+          <div>
+            <span>Metadata</span>{" "}
+            {selectedVoice.emotion ?? "neutral"} ·{" "}
+            {selectedVoice.style ?? "default"}
           </div>
         </div>
       )}
@@ -6110,7 +6551,18 @@ function TtsPanel(props: {
 
       {activeJob && !downloadJob && (
         <div className="tts-progress">
-          <ProgressRow label="Synthesising" pct={progress} />
+          <ProgressRow
+            label={
+              progressDetail
+                ? `${formatTtsProgressStage(progressDetail.stage)}${
+                    progressDetail.totalSegments > 0
+                      ? ` · ${progressDetail.completedSegments}/${progressDetail.totalSegments}`
+                      : ""
+                  }`
+                : "Generating voice"
+            }
+            pct={progress}
+          />
         </div>
       )}
 

@@ -152,6 +152,31 @@ impl SubtitleService {
         .await
     }
 
+    pub async fn assign_voice_to_speaker(
+        self: &Arc<Self>,
+        project_id: String,
+        speaker: String,
+        voice_id: Option<String>,
+    ) -> Result<SubtitleDoc, SubtitleError> {
+        let speaker = speaker.trim().to_string();
+        self.mutate(project_id, move |doc| {
+            let mut changed = false;
+            for segment in &mut doc.segments {
+                if segment.speaker.as_deref().map(str::trim) == Some(speaker.as_str())
+                    && segment.voice_id != voice_id
+                {
+                    segment.voice_id = voice_id.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                doc.dirty.mark_content_dirty();
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn add_segment(
         self: &Arc<Self>,
         project_id: String,

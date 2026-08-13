@@ -10,6 +10,7 @@ import {
   type AppSettings,
   type AppSettingsPatch,
   type CreateProjectInput,
+  type CreateTtsVoiceProfileRequest,
   type EnvInfo,
   type ExportKind,
   type ExportSubtitlesResult,
@@ -76,6 +77,7 @@ import {
   type TtsManifest,
   type TtsRecommendedVoicePreset,
   type TtsSegmentCompletedEvent,
+  type TtsProgressDetailEvent,
   type TtsSettings,
   type TtsSummary,
   type VideoMetadata,
@@ -202,6 +204,16 @@ export const api = {
       segmentId,
       patch,
     }),
+  assignSubtitleVoiceToSpeaker: (
+    projectId: string,
+    speaker: string,
+    voiceId: string | null,
+  ) =>
+    invoke<SubtitleDoc>("assign_subtitle_voice_to_speaker", {
+      projectId,
+      speaker,
+      voiceId,
+    }),
   addSubtitleSegment: (
     projectId: string,
     afterId: number | null,
@@ -248,6 +260,8 @@ export const api = {
   // Phase 6 (Local TTS / AI dubbing)
   getTtsEnv: () => invoke<TtsEnv>("get_tts_env"),
   listTtsVoices: () => invoke<VoiceInfo[]>("list_tts_voices"),
+  createTtsVoiceProfile: (request: CreateTtsVoiceProfileRequest) =>
+    invoke<VoiceInfo>("create_tts_voice_profile", { request }),
   // Phase 12 — TTS voice auto-download, mirrors the STT +
   // translation download flow. Presets live in the worker at
   // ``tts/registry.py::_RECOMMENDED_VOICES``; the download itself
@@ -475,6 +489,14 @@ export function onTtsSegmentCompleted(
   );
 }
 
+export function onTtsProgressDetail(
+  cb: (evt: TtsProgressDetailEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<TtsProgressDetailEvent>("tts://progress", (evt) =>
+    cb(evt.payload),
+  );
+}
+
 export function onSyncSegmentCompleted(
   cb: (evt: SyncSegmentCompletedEvent) => void,
 ): Promise<UnlistenFn> {
@@ -506,6 +528,16 @@ export async function pickMediaFile(): Promise<string | null> {
         extensions: ["mp4", "m4v", "mkv", "mov", "avi", "webm"],
       },
     ],
+  });
+  if (result == null) return null;
+  return typeof result === "string" ? result : (result as { path: string }).path;
+}
+
+/** Select a local WAV reference used by F5-TTS voice profiles. */
+export async function pickTtsReferenceAudio(): Promise<string | null> {
+  const result = await openDialog({
+    multiple: false,
+    filters: [{ name: "Reference voice WAV", extensions: ["wav"] }],
   });
   if (result == null) return null;
   return typeof result === "string" ? result : (result as { path: string }).path;

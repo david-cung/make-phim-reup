@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..errors import RpcError, RpcErrorCode
+from .f5_vietnamese_provider import F5VietnameseTTSProvider
 from .piper_provider import PiperTTSProvider
 from .provider import TTSProvider
 
@@ -31,11 +32,17 @@ class TTSManager:
         key = (engine or "piper").strip().lower()
         if key in ("vietnamese", "vi", "vi-vn"):
             key = "piper"
+        if key == "f5":
+            key = "f5-vietnamese"
         if key in self._providers:
             return self._providers[key]
         if key == "piper":
             provider: TTSProvider = PiperTTSProvider(self._models_root)
             self._providers[key] = provider
+            return provider
+        if key == "f5-vietnamese":
+            provider = F5VietnameseTTSProvider(self._models_root)
+            self._providers["f5-vietnamese"] = provider
             return provider
         raise RpcError(
             RpcErrorCode.TTS_ENGINE_UNAVAILABLE,

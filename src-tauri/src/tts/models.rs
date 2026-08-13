@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::jobs::JobSnapshot;
 
-pub const TTS_CACHE_SCHEMA_VERSION: u32 = 1;
+pub const TTS_CACHE_SCHEMA_VERSION: u32 = 2;
 
 // -------------------------------------------------------------- settings
 
@@ -25,6 +25,18 @@ pub struct TtsSettings {
     pub pitch: f32,
     #[serde(default = "default_volume")]
     pub volume: f32,
+    #[serde(default)]
+    pub device: TtsDevice,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsDevice {
+    #[default]
+    Auto,
+    Cpu,
+    Cuda,
+    Mps,
 }
 
 fn default_speed() -> f32 {
@@ -41,6 +53,7 @@ impl Default for TtsSettings {
             speed: 1.0,
             pitch: 0.0,
             volume: 1.0,
+            device: TtsDevice::Auto,
         }
     }
 }
@@ -51,6 +64,7 @@ impl TtsSettings {
             speed: clamp_f32(self.speed, 0.25, 4.0),
             pitch: clamp_f32(self.pitch, -12.0, 12.0),
             volume: clamp_f32(self.volume, 0.0, 4.0),
+            device: self.device,
         }
     }
 }
@@ -79,6 +93,42 @@ pub struct TtsEngineInfo {
     pub available: bool,
     #[serde(default)]
     pub supported_settings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commercial_use: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct F5ModelInfo {
+    pub id: String,
+    pub engine: String,
+    pub name: String,
+    pub installed: bool,
+    pub status: String,
+    pub path: String,
+    pub source: String,
+    pub version: String,
+    pub license: String,
+    pub commercial_use: bool,
+    pub approx_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct F5HardwareInfo {
+    pub backend: String,
+    pub cuda_available: bool,
+    pub mps_available: bool,
+    pub gpu_name: Option<String>,
+    pub vram_gb: Option<f64>,
+    pub ram_total_gb: Option<f64>,
+    pub ram_available_gb: Option<f64>,
+    pub os: String,
+    pub recommended: bool,
+    pub warning: Option<String>,
+    pub runtime_error: Option<String>,
 }
 
 /// Snapshot returned by ``get_tts_env``.
@@ -89,6 +139,9 @@ pub struct TtsEnv {
     pub models_root: String,
     pub tts_root: String,
     pub piper_installed: bool,
+    pub f5_runtime_installed: bool,
+    pub f5_model: F5ModelInfo,
+    pub f5_hardware: F5HardwareInfo,
     pub default_engine: String,
 }
 
@@ -110,6 +163,10 @@ pub struct RecommendedVoicePreset {
     pub approx_size_bytes: u64,
     pub label: String,
     pub is_default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commercial_use: Option<bool>,
 }
 
 /// One installed voice model.
@@ -130,6 +187,40 @@ pub struct VoiceInfo {
     pub quality: Option<String>,
     #[serde(default)]
     pub supported_settings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_audio_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commercial_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateVoiceProfileRequest {
+    pub id: String,
+    pub name: String,
+    pub gender: String,
+    pub reference_audio_path: String,
+    pub reference_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 // -------------------------------------------------------------- manifest
@@ -154,6 +245,8 @@ pub struct TtsSegmentEntry {
     pub speed: f32,
     pub pitch: f32,
     pub volume: f32,
+    #[serde(default)]
+    pub device: TtsDevice,
     /// Path relative to the project root (e.g. ``voices/000012.wav``).
     pub file: String,
     pub duration_secs: f64,
@@ -309,6 +402,8 @@ pub fn build_segment_cache_key(
         format!("speed={:.4}", s.speed),
         format!("pitch={:.4}", s.pitch),
         format!("volume={:.4}", s.volume),
+        format!("device={:?}", s.device).to_lowercase(),
+        format!("voiceIdentity={}", model_name),
         format!("text={}", text),
     ];
     let mut hasher = Sha256::new();

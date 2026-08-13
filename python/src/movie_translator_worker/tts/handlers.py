@@ -25,6 +25,11 @@ is stale.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import shutil
+import wave
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,6 +37,7 @@ from .. import logging as log
 from ..errors import RpcError, RpcErrorCode
 from ..rpc import HandlerContext
 from . import registry
+from .hardware import f5_hardware_capability
 from .models import (
     BatchSegment,
     TTSSettings,
@@ -42,6 +48,7 @@ from .models import (
 from .prosody import shorten_for_duration
 from .manager import TTSManager
 from .provider import ProviderCancelled, ProviderError, TTSProvider
+from .text_normalization import normalize_tts_text
 
 _MODELS_ROOT: Optional[Path] = None
 _MANAGER: Optional[TTSManager] = None
@@ -85,6 +92,9 @@ def tts_env(_params: dict[str, Any]) -> dict[str, Any]:
         "modelsRoot": str(_models_root()),
         "ttsRoot": str(registry.tts_root(_models_root())),
         "piperInstalled": registry.piper_installed(),
+        "f5RuntimeInstalled": registry.f5_runtime_installed(),
+        "f5Model": registry.f5_model_status(_models_root()),
+        "f5Hardware": f5_hardware_capability(),
         "defaultEngine": "piper",
     }
 
@@ -124,13 +134,12 @@ def tts_download_voice(
             RpcErrorCode.TTS_UNKNOWN_PRESET,
             f"unknown TTS voice preset: {preset}",
         )
+    if str(meta["engine"]) == registry.F5_ENGINE:
+        return _download_f5_model(preset, ctx)
     if str(meta["engine"]) != "piper":
-        # Only Piper is wired up so far. Adding another engine here
-        # is a matter of extending the branch — the download flow
-        # itself is engine-agnostic.
         raise RpcError(
             RpcErrorCode.TTS_UNKNOWN_PRESET,
-            f"auto-download is only supported for Piper voices right now (got {meta['engine']!r})",
+            f"unsupported local TTS preset engine: {meta['engine']!r}",
         )
     voice_id = str(meta["voice_id"])
     repo = str(meta["repo"])
@@ -271,18 +280,256 @@ def _cleanup_voice(voice_dir: Path, *files: Path) -> None:
         pass
 
 
+def _download_f5_model(
+    preset: str,
+    ctx: HandlerContext,
+) -> dict[str, Any]:
+    paths = registry.f5_model_paths(_models_root())
+    status = registry.f5_model_status(_models_root())
+
+    def progress(fraction: float, stage: str) -> None:
+        ctx.emit_progress(
+            "tts.download_progress",
+            {"fraction": max(0.0, min(1.0, fraction)), "stage": stage},
+        )
+
+    if status["installed"]:
+        progress(1.0, "already_installed")
+        return {
+            "ok": True,
+            "preset": preset,
+            "voiceId": "",
+            "engine": registry.F5_ENGINE,
+            "modelPath": str(paths["checkpoint"]),
+            "configPath": str(paths["vocab"]),
+            "sizeBytes": paths["checkpoint"].stat().st_size,
+            "alreadyInstalled": True,
+        }
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RpcError(
+            RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
+            "huggingface_hub is required to install the F5-TTS model",
+        ) from exc
+
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    paths["vocoder_config"].parent.mkdir(parents=True, exist_ok=True)
+    progress(0.0, "preparing")
+    try:
+        if ctx.cancelled():
+            raise RpcError(RpcErrorCode.CANCELLED, "model installation cancelled")
+        progress(0.03, "downloading_vocabulary")
+        vocab_source = Path(
+            hf_hub_download(
+                repo_id=registry.F5_MODEL_ID,
+                revision=registry.F5_MODEL_REVISION,
+                filename="config.json",
+                local_dir=str(paths["root"]),
+            )
+        )
+        _move_into_place(vocab_source, paths["vocab"])
+
+        progress(0.06, "downloading_vocoder")
+        vocoder_config = Path(
+            hf_hub_download(
+                repo_id=registry.F5_VOCODER_REPO,
+                revision=registry.F5_VOCODER_REVISION,
+                filename="config.yaml",
+                local_dir=str(paths["vocoder_config"].parent),
+            )
+        )
+        _move_into_place(vocoder_config, paths["vocoder_config"])
+        vocoder_model = Path(
+            hf_hub_download(
+                repo_id=registry.F5_VOCODER_REPO,
+                revision=registry.F5_VOCODER_REVISION,
+                filename="pytorch_model.bin",
+                local_dir=str(paths["vocoder_model"].parent),
+            )
+        )
+        _move_into_place(vocoder_model, paths["vocoder_model"])
+
+        if ctx.cancelled():
+            raise RpcError(RpcErrorCode.CANCELLED, "model installation cancelled")
+        progress(0.10, "downloading_model_5_39gb")
+        checkpoint_source = Path(
+            hf_hub_download(
+                repo_id=registry.F5_MODEL_ID,
+                revision=registry.F5_MODEL_REVISION,
+                filename=registry.F5_MODEL_FILENAME,
+                local_dir=str(paths["root"]),
+            )
+        )
+        _move_into_place(checkpoint_source, paths["checkpoint"])
+        if ctx.cancelled():
+            raise RpcError(RpcErrorCode.CANCELLED, "model installation cancelled")
+
+        metadata = {
+            "id": "f5-vietnamese-vivoice",
+            "name": "F5-TTS Vietnamese ViVoice",
+            "version": registry.F5_MODEL_REVISION,
+            "source": registry.F5_MODEL_ID,
+            "license": registry.F5_MODEL_LICENSE,
+            "commercialUse": False,
+            "checkpointSha256": "5ae8293dd09868d5758cd1edc6b74f53bd0200652d907bd43724a69c7b82ea1f",
+            "vocoderSource": registry.F5_VOCODER_REPO,
+            "vocoderLicense": "MIT",
+        }
+        tmp_metadata = paths["metadata"].with_suffix(".json.tmp")
+        tmp_metadata.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_metadata.replace(paths["metadata"])
+        progress(1.0, "installed")
+    except RpcError:
+        raise
+    except Exception as exc:
+        raise RpcError(
+            RpcErrorCode.TTS_DOWNLOAD_FAILED,
+            f"failed to install F5-TTS Vietnamese model: {exc}",
+        ) from exc
+    return {
+        "ok": True,
+        "preset": preset,
+        "voiceId": "",
+        "engine": registry.F5_ENGINE,
+        "modelPath": str(paths["checkpoint"]),
+        "configPath": str(paths["vocab"]),
+        "sizeBytes": paths["checkpoint"].stat().st_size,
+        "alreadyInstalled": False,
+    }
+
+
+def tts_create_voice_profile(
+    params: dict[str, Any], _ctx: HandlerContext
+) -> dict[str, Any]:
+    profile_id = _slug(_require_str(params, "id"))
+    name = _require_str(params, "name").strip()
+    gender = (_optional_str(params, "gender") or "unknown").lower()
+    emotion = (_optional_str(params, "emotion") or "neutral").lower()
+    style = (_optional_str(params, "style") or "default").lower()
+    reference_source = Path(_require_str(params, "referenceAudioPath"))
+    reference_text = normalize_tts_text(_require_str(params, "referenceText"))
+    if not reference_text:
+        raise RpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "reference transcript cannot be blank",
+        )
+    if not registry.f5_model_status(_models_root())["installed"]:
+        raise RpcError(
+            RpcErrorCode.TTS_VOICE_MISSING,
+            "install the F5-TTS Vietnamese model before creating a reference voice",
+        )
+    if not reference_source.is_file():
+        raise RpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            f"reference audio does not exist: {reference_source}",
+        )
+    if reference_source.suffix.lower() != ".wav":
+        raise RpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "F5 reference audio must be a WAV file",
+        )
+    try:
+        with wave.open(str(reference_source), "rb") as reader:
+            duration = reader.getnframes() / max(1, reader.getframerate())
+    except (OSError, wave.Error) as exc:
+        raise RpcError(RpcErrorCode.INVALID_PARAMS, f"invalid reference WAV: {exc}") from exc
+    if duration < 1.0 or duration > 30.0:
+        raise RpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "reference audio must be between 1 and 30 seconds (under 10 seconds is recommended)",
+        )
+    voice_dir = registry.f5_model_paths(_models_root())["voices"] / profile_id
+    if voice_dir.exists():
+        raise RpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            f"voice profile {profile_id!r} already exists",
+        )
+    voice_dir.mkdir(parents=True, exist_ok=False)
+    destination = voice_dir / "reference.wav"
+    try:
+        tmp_audio = voice_dir / "reference.wav.tmp"
+        shutil.copy2(reference_source, tmp_audio)
+        tmp_audio.replace(destination)
+        reference_sha = _sha256_file(destination)
+        profile = {
+            "id": profile_id,
+            "name": name,
+            "language": "vi-VN",
+            "gender": gender if gender in {"male", "female", "neutral"} else "unknown",
+            "provider": registry.F5_ENGINE,
+            "referenceAudio": destination.name,
+            "referenceText": reference_text,
+            "referenceSha256": reference_sha,
+            "model": "F5-TTS-Vietnamese-ViVoice",
+            "modelVersion": registry.F5_MODEL_REVISION,
+            "license": registry.F5_MODEL_LICENSE,
+            "commercialUse": False,
+            "emotion": emotion
+            if emotion
+            in {
+                "neutral",
+                "happy",
+                "sad",
+                "angry",
+                "afraid",
+                "surprised",
+                "serious",
+                "excited",
+                "calm",
+                "whisper",
+            }
+            else "neutral",
+            "style": style[:32],
+        }
+        tmp_json = voice_dir / "voice.json.tmp"
+        tmp_json.write_text(
+            json.dumps(profile, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_json.replace(voice_dir / "voice.json")
+    except Exception:
+        shutil.rmtree(voice_dir, ignore_errors=True)
+        raise
+    voice = registry.resolve_f5_voice(_models_root(), profile_id)
+    if voice is None:
+        shutil.rmtree(voice_dir, ignore_errors=True)
+        raise RpcError(RpcErrorCode.TTS_MODEL_INVALID, "created voice profile is invalid")
+    return {"ok": True, "voice": voice.to_dict()}
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-_").lower()
+    if not slug:
+        raise RpcError(RpcErrorCode.INVALID_PARAMS, "voice profile id is empty")
+    return slug[:64]
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def tts_synthesize_one(
     params: dict[str, Any], ctx: HandlerContext
 ) -> dict[str, Any]:
     engine = _optional_str(params, "engine") or "piper"
     voice_id = _require_str(params, "voiceId")
-    text = _require_str(params, "text")
+    source_text = _require_str(params, "text").strip()
+    text = normalize_tts_text(source_text)
     output_path = _require_str(params, "outputPath")
     settings = TTSSettings.from_dict(params.get("settings"))
     segment_id_raw = params.get("segmentId")
     segment_id = int(segment_id_raw) if isinstance(segment_id_raw, (int, float)) else -1
 
     provider = _provider_for(engine)
+    _set_cancel_checker(provider, ctx.cancelled)
     if ctx.cancelled():
         raise RpcError(RpcErrorCode.CANCELLED, "cancelled before start")
 
@@ -301,13 +548,18 @@ def tts_synthesize_one(
         raise RpcError(e.code, e.message, data={"recoverable": e.recoverable}) from e
 
     voice_info = registry.resolve_voice(_models_root(), engine, voice_id)
-    model_name = Path(voice_info.model_path).name if voice_info else voice_id
+    model_name = (
+        voice_info.cache_identity or Path(voice_info.model_path).name
+        if voice_info
+        else voice_id
+    )
     cache_key = build_segment_cache_key(
         engine=engine,
         voice_id=voice_id,
         model_name=model_name,
         text=text,
         settings=settings,
+        voice_identity=model_name,
     )
     return {
         "ok": True,
@@ -316,8 +568,8 @@ def tts_synthesize_one(
         "voiceId": voice_id,
         "modelName": model_name,
         "cacheKey": cache_key,
-        "textHash": text_hash(text),
-        "text": text,
+        "textHash": text_hash(source_text),
+        "text": source_text,
         "file": output_path,
         "durationSecs": result.duration_secs,
         "sampleRate": result.sample_rate,
@@ -328,6 +580,18 @@ def tts_synthesize_one(
 
 
 def tts_synthesize_batch(
+    params: dict[str, Any], ctx: HandlerContext
+) -> dict[str, Any]:
+    try:
+        return _tts_synthesize_batch_impl(params, ctx)
+    finally:
+        if _MANAGER is not None:
+            for _name, loaded_provider in _MANAGER.items():
+                _safe_unload(loaded_provider)
+                _set_cancel_checker(loaded_provider, lambda: False)
+
+
+def _tts_synthesize_batch_impl(
     params: dict[str, Any], ctx: HandlerContext
 ) -> dict[str, Any]:
     engine = _optional_str(params, "engine") or "piper"
@@ -358,6 +622,7 @@ def tts_synthesize_batch(
         raise RpcError(RpcErrorCode.INVALID_PARAMS, str(e)) from e
 
     provider = _provider_for(engine)
+    _set_cancel_checker(provider, ctx.cancelled)
     project_dir = Path(project_root)
     voices_dir = project_dir / voices_subdir
     voices_dir.mkdir(parents=True, exist_ok=True)
@@ -374,7 +639,7 @@ def tts_synthesize_batch(
     ctx.emit_progress(
         "tts.progress",
         {
-            "stage": "starting",
+            "stage": "preparing",
             "fraction": 0.0,
             "completedSegments": 0,
             "totalSegments": total,
@@ -386,10 +651,13 @@ def tts_synthesize_batch(
 
     for idx, seg in enumerate(segments):
         if ctx.cancelled():
+            _safe_unload(provider)
             raise RpcError(RpcErrorCode.CANCELLED, "tts cancelled by user")
 
         voice_id = seg.voice_id or default_voice_id
         settings = seg.settings or default_settings
+        source_text = seg.text.strip()
+        normalized_text = normalize_tts_text(source_text)
         if voice_id not in voice_cache:
             voice_cache[voice_id] = registry.resolve_voice(
                 _models_root(), engine, voice_id
@@ -408,7 +676,7 @@ def tts_synthesize_batch(
         ctx.emit_progress(
             "tts.progress",
             {
-                "stage": "synthesizing",
+                "stage": "loading_model" if idx == 0 else "generating_voice",
                 "fraction": idx / total,
                 "completedSegments": generated,
                 "totalSegments": total,
@@ -419,15 +687,17 @@ def tts_synthesize_batch(
         try:
             result = _synthesize_fitting(
                 provider,
-                text=seg.text,
+                text=normalized_text,
                 voice_id=voice_id,
                 output_path=str(dst),
                 settings=settings,
                 target_duration=seg.target_duration_secs,
             )
         except ProviderCancelled as e:
+            _safe_unload(provider)
             raise RpcError(RpcErrorCode.CANCELLED, "tts cancelled by user") from e
         except ProviderError as e:
+            _safe_unload(provider)
             log.warn(
                 "tts segment failed",
                 segment=seg.id,
@@ -446,20 +716,21 @@ def tts_synthesize_batch(
                 },
             ) from e
 
-        model_name = Path(voice_info.model_path).name
+        model_name = voice_info.cache_identity or Path(voice_info.model_path).name
         cache_key = build_segment_cache_key(
             engine=engine,
             voice_id=voice_id,
             model_name=model_name,
-            text=seg.text,
+            text=normalized_text,
             settings=settings,
+            voice_identity=model_name,
         )
         generated += 1
         log.info(
             "tts segment complete",
             segment=seg.id,
             voice=voice_id,
-            text_chars=len(seg.text),
+            text_chars=len(normalized_text),
             output=str(dst),
             size_bytes=result.size_bytes,
             duration_secs=round(result.duration_secs, 3),
@@ -475,8 +746,8 @@ def tts_synthesize_batch(
                 "voiceId": voice_id,
                 "modelName": model_name,
                 "cacheKey": cache_key,
-                "textHash": text_hash(seg.text),
-                "text": seg.text,
+                "textHash": text_hash(source_text),
+                "text": source_text,
                 "file": rel,
                 "durationSecs": result.duration_secs,
                 "sampleRate": result.sample_rate,
@@ -491,10 +762,7 @@ def tts_synthesize_batch(
 
     # Release the model between explicit batches so long-idle projects
     # don't hold hundreds of MB.
-    try:
-        provider.unload()
-    except Exception:  # pragma: no cover - unload must never fail loudly
-        pass
+    _safe_unload(provider)
 
     ctx.emit_progress(
         "tts.progress",
@@ -534,6 +802,19 @@ def tts_unload(_params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "released": released}
 
 
+def _safe_unload(provider: TTSProvider) -> None:
+    try:
+        provider.unload()
+    except Exception:  # pragma: no cover - unload must never fail loudly
+        pass
+
+
+def _set_cancel_checker(provider: TTSProvider, checker) -> None:
+    setter = getattr(provider, "set_cancel_checker", None)
+    if callable(setter):
+        setter(checker)
+
+
 # ----------------------------------------------------------------- registration
 
 
@@ -545,6 +826,7 @@ def install(dispatcher) -> None:
     dispatcher.register_async("tts.synthesize_one", tts_synthesize_one)
     dispatcher.register_async("tts.synthesize_batch", tts_synthesize_batch)
     dispatcher.register_async("tts.download_voice", tts_download_voice)
+    dispatcher.register_async("tts.create_voice_profile", tts_create_voice_profile)
 
 
 # ------------------------------------------------------------------ helpers
@@ -581,6 +863,7 @@ def _synthesize_fitting(
             speed=faster,
             pitch=settings.pitch,
             volume=settings.volume,
+            device=settings.device,
         )
     if spoken != text or abs(next_settings.speed - settings.speed) > 1e-3:
         result = provider.synthesize(spoken, voice_id, output_path, next_settings)

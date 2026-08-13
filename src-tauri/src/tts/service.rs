@@ -19,6 +19,7 @@
 //!        flag when the whole doc is covered, and emits the terminal
 //!        `job://update`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -37,9 +38,10 @@ use crate::worker::WorkerSupervisor;
 use super::cache::{voices_dir, TtsCacheFile, VOICES_RELATIVE, VOICES_SUBDIR};
 use super::errors::TtsError;
 use super::models::{
-    build_segment_cache_key, entry_matches, text_hash, voice_file_relative, GenerateMode,
-    GenerateRequest, PreviewResult, RecommendedVoicePreset, TtsEnv, TtsGenerateStart, TtsManifest,
-    TtsSegmentEntry, TtsSettings, TtsSummary, VoiceInfo,
+    build_segment_cache_key, entry_matches, text_hash, voice_file_relative,
+    CreateVoiceProfileRequest, GenerateMode, GenerateRequest, PreviewResult,
+    RecommendedVoicePreset, TtsDevice, TtsEnv, TtsGenerateStart, TtsManifest, TtsSegmentEntry,
+    TtsSettings, TtsSummary, VoiceInfo,
 };
 
 const PROGRESS_EMIT_MIN_INTERVAL_MS: u128 = 100;
@@ -148,6 +150,38 @@ impl TtsService {
             TtsError::Worker(crate::worker::WorkerError::Protocol { msg: e.to_string() })
         })?;
         Ok(r.voices)
+    }
+
+    pub async fn create_voice_profile(
+        self: &Arc<Self>,
+        request: CreateVoiceProfileRequest,
+    ) -> Result<VoiceInfo, TtsError> {
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            voice: VoiceInfo,
+        }
+        let value = self
+            .worker
+            .request_no_timeout_with_id(
+                &self.worker.new_request_id(),
+                "tts.create_voice_profile",
+                serde_json::to_value(request).map_err(|err| {
+                    TtsError::Worker(crate::worker::WorkerError::Protocol {
+                        msg: err.to_string(),
+                    })
+                })?,
+            )
+            .await
+            .map_err(|err| match err {
+                crate::worker::WorkerError::Rpc(rpc) => TtsError::from_rpc(rpc),
+                other => TtsError::Worker(other),
+            })?;
+        let response: Resp = serde_json::from_value(value).map_err(|err| {
+            TtsError::Worker(crate::worker::WorkerError::Protocol {
+                msg: err.to_string(),
+            })
+        })?;
+        Ok(response.voice)
     }
 
     /// Phase 12 — curated presets the app can auto-download.
@@ -341,7 +375,13 @@ impl TtsService {
             path: root.display().to_string(),
             source,
         })?;
-        Ok(Some(build_summary(&doc, manifest.as_ref(), &request)))
+        let identities = voice_identity_map(self.list_voices().await?);
+        Ok(Some(build_summary_with_identities(
+            &doc,
+            manifest.as_ref(),
+            &request,
+            Some(&identities),
+        )))
     }
 
     // ---------------------------------------------------------- preview
@@ -389,6 +429,8 @@ impl TtsService {
                 })?;
         let engine_name = engine.unwrap_or_else(|| "piper".into());
         let effective_settings = settings.unwrap_or_default().normalised();
+        let identities = voice_identity_map(self.list_voices().await?);
+        let expected_identity = identities.get(&voice_identity_key(&engine_name, &voice_id));
 
         // Cache check: if the manifest already has a matching entry
         // and the file is present, return it directly.
@@ -410,6 +452,10 @@ impl TtsService {
                         && (effective_settings.speed - entry.speed).abs() < 1e-4
                         && (effective_settings.pitch - entry.pitch).abs() < 1e-4
                         && (effective_settings.volume - entry.volume).abs() < 1e-4
+                        && effective_settings.device == entry.device
+                        && expected_identity
+                            .map(|identity| entry.model_name.as_str() == identity.as_str())
+                            .unwrap_or(false)
                     {
                         return Ok(PreviewResult {
                             segment_id,
@@ -503,12 +549,13 @@ impl TtsService {
             path: project_root.display().to_string(),
             source,
         })?;
+        let identities = voice_identity_map(self.list_voices().await?);
 
         // Build the todo list per the requested mode.
-        let todo = plan_generation(&doc, manifest.as_ref(), &request);
+        let todo = plan_generation(&doc, manifest.as_ref(), &request, &identities);
 
         if todo.is_empty() {
-            let summary = build_summary(
+            let summary = build_summary_with_identities(
                 &doc,
                 manifest.as_ref(),
                 &SummaryRequest {
@@ -516,6 +563,7 @@ impl TtsService {
                     default_voice_id: request.default_voice_id.clone(),
                     settings: request.settings,
                 },
+                Some(&identities),
             );
             let _ = self.maybe_clear_dirty(project_id.clone(), &summary).await;
             return Ok(TtsGenerateStart::UpToDate { summary });
@@ -619,6 +667,15 @@ impl TtsService {
                     progress: frac,
                 };
                 let _ = app_for_prog.emit("job://progress", evt);
+                let detail = json!({
+                    "jobId": job_for_prog.clone(),
+                    "projectId": project_for_prog.clone(),
+                    "stage": params.get("stage").and_then(|v| v.as_str()).unwrap_or("generating_voice"),
+                    "completedSegments": params.get("completedSegments").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "totalSegments": params.get("totalSegments").and_then(|v| v.as_u64()).unwrap_or(0),
+                    "currentSegmentId": params.get("currentSegmentId").and_then(|v| v.as_u64()),
+                });
+                let _ = app_for_prog.emit("tts://progress", detail);
                 let mut last = last_persisted.lock();
                 if (frac - *last).abs() >= 0.05 || frac >= 1.0 {
                     *last = frac;
@@ -1026,7 +1083,37 @@ fn settings_to_wire(s: &TtsSettings) -> Value {
         "speed": n.speed,
         "pitch": n.pitch,
         "volume": n.volume,
+        "device": n.device,
     })
+}
+
+fn voice_identity_key(engine: &str, voice_id: &str) -> String {
+    format!("{engine}\u{1f}{voice_id}")
+}
+
+fn voice_identity_map(voices: Vec<VoiceInfo>) -> HashMap<String, String> {
+    voices
+        .into_iter()
+        .map(|voice| {
+            let VoiceInfo {
+                engine,
+                id,
+                cache_identity,
+                model_name,
+                model_path,
+                ..
+            } = voice;
+            let key = voice_identity_key(&engine, &id);
+            let identity = cache_identity.or(model_name).unwrap_or_else(|| {
+                Path::new(&model_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&id)
+                    .to_string()
+            });
+            (key, identity)
+        })
+        .collect()
 }
 
 /// Build a `TtsSegmentEntry` from either a `tts.synthesize_one` reply
@@ -1093,6 +1180,10 @@ fn entry_from_worker_response(v: &Value, fallback_id: u32) -> Result<TtsSegmentE
         .and_then(|s| s.get("volume"))
         .and_then(|x| x.as_f64())
         .unwrap_or(1.0) as f32;
+    let device = settings
+        .and_then(|s| s.get("device"))
+        .and_then(|value| serde_json::from_value::<TtsDevice>(value.clone()).ok())
+        .unwrap_or_default();
     Ok(TtsSegmentEntry {
         segment_id,
         engine,
@@ -1104,6 +1195,7 @@ fn entry_from_worker_response(v: &Value, fallback_id: u32) -> Result<TtsSegmentE
         speed,
         pitch,
         volume,
+        device,
         file,
         duration_secs: duration,
         sample_rate,
@@ -1121,6 +1213,7 @@ fn plan_generation(
     doc: &SubtitleDoc,
     manifest: Option<&TtsManifest>,
     request: &GenerateRequest,
+    voice_identities: &HashMap<String, String>,
 ) -> Vec<TodoEntry> {
     let mut todo: Vec<TodoEntry> = Vec::new();
     let force_ids: Option<std::collections::HashSet<u32>> = match &request.mode {
@@ -1142,6 +1235,8 @@ fn plan_generation(
             continue;
         }
         let effective_settings = settings_default; // per-segment overrides are Phase 7+ material.
+        let expected_identity =
+            voice_identities.get(&voice_identity_key(&request.engine, &voice_id));
 
         let should_generate = match &force_ids {
             Some(set) => set.contains(&seg.id),
@@ -1158,6 +1253,12 @@ fn plan_generation(
                                 && (effective_settings.speed - entry.speed).abs() < 1e-4
                                 && (effective_settings.pitch - entry.pitch).abs() < 1e-4
                                 && (effective_settings.volume - entry.volume).abs() < 1e-4
+                                && effective_settings.device == entry.device
+                                && expected_identity
+                                    .map(|identity| {
+                                        entry.model_name.as_str() == identity.as_str()
+                                    })
+                                    .unwrap_or(false)
                         })
                         .unwrap_or(false)
                 }
@@ -1183,6 +1284,15 @@ pub fn build_summary(
     manifest: Option<&TtsManifest>,
     request: &SummaryRequest,
 ) -> TtsSummary {
+    build_summary_with_identities(doc, manifest, request, None)
+}
+
+fn build_summary_with_identities(
+    doc: &SubtitleDoc,
+    manifest: Option<&TtsManifest>,
+    request: &SummaryRequest,
+    voice_identities: Option<&HashMap<String, String>>,
+) -> TtsSummary {
     let settings = request.settings.normalised();
     let mut generated = 0u32;
     let mut missing = 0u32;
@@ -1204,12 +1314,22 @@ pub fn build_summary(
         }
         match manifest.and_then(|m| m.find(seg.id)) {
             Some(entry) => {
+                let identity_matches = voice_identities
+                    .map(|identities| {
+                        identities
+                            .get(&voice_identity_key(&request.engine, &voice_id))
+                            .map(|identity| entry.model_name.as_str() == identity.as_str())
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(true);
                 let matches = entry.text_hash == text_hash(&text)
                     && entry.engine == request.engine
                     && entry.voice_id == voice_id
                     && (settings.speed - entry.speed).abs() < 1e-4
                     && (settings.pitch - entry.pitch).abs() < 1e-4
                     && (settings.volume - entry.volume).abs() < 1e-4;
+                let matches =
+                    matches && settings.device == entry.device && identity_matches;
                 if matches {
                     generated += 1;
                 } else {

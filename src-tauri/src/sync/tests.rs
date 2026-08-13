@@ -63,6 +63,7 @@ fn tts_entry(id: u32, text: &str, duration: f64, sample_rate: u32) -> TtsSegment
         speed: 1.0,
         pitch: 0.0,
         volume: 1.0,
+        device: settings.device,
         file: format!("voices/{id:06}.wav"),
         duration_secs: duration,
         sample_rate,

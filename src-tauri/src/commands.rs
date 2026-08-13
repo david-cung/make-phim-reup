@@ -46,8 +46,8 @@ use crate::translation::{
     TranslationSummary,
 };
 use crate::tts::{
-    GenerateRequest, PreviewResult, TtsEnv, TtsGenerateStart, TtsManifest, TtsSettings, TtsSummary,
-    VoiceInfo,
+    CreateVoiceProfileRequest, GenerateRequest, PreviewResult, TtsEnv, TtsGenerateStart,
+    TtsManifest, TtsSettings, TtsSummary, VoiceInfo,
 };
 use crate::worker::{EnvInfo, PingResponse, WorkerStatus};
 
@@ -671,6 +671,19 @@ pub async fn update_subtitle_segment(
 }
 
 #[tauri::command]
+pub async fn assign_subtitle_voice_to_speaker(
+    state: State<'_, AppState>,
+    project_id: String,
+    speaker: String,
+    voice_id: Option<String>,
+) -> Result<SubtitleDoc, AppError> {
+    Ok(state
+        .subtitles
+        .assign_voice_to_speaker(project_id, speaker, voice_id)
+        .await?)
+}
+
+#[tauri::command]
 pub async fn add_subtitle_segment(
     state: State<'_, AppState>,
     project_id: String,
@@ -762,6 +775,14 @@ pub async fn get_tts_env(state: State<'_, AppState>) -> Result<TtsEnv, AppError>
 #[tauri::command]
 pub async fn list_tts_voices(state: State<'_, AppState>) -> Result<Vec<VoiceInfo>, AppError> {
     Ok(state.tts.list_voices().await?)
+}
+
+#[tauri::command]
+pub async fn create_tts_voice_profile(
+    state: State<'_, AppState>,
+    request: CreateVoiceProfileRequest,
+) -> Result<VoiceInfo, AppError> {
+    Ok(state.tts.create_voice_profile(request).await?)
 }
 
 #[tauri::command]

@@ -7,7 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::models::TtsManifest;
+use super::models::{TtsManifest, TTS_CACHE_SCHEMA_VERSION};
 
 pub const VOICES_SUBDIR: &str = "voices";
 pub const VOICES_FILENAME: &str = "voices.json";
@@ -23,7 +23,11 @@ impl TtsCacheFile {
             Ok(text) => {
                 let doc: TtsManifest = serde_json::from_str(&text)
                     .map_err(|e| io::Error::other(format!("invalid voices.json: {e}")))?;
-                Ok(Some(doc))
+                if doc.version == TTS_CACHE_SCHEMA_VERSION {
+                    Ok(Some(doc))
+                } else {
+                    Ok(None)
+                }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err),

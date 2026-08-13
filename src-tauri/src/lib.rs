@@ -129,6 +129,7 @@ pub fn run() {
             commands::get_project_subtitles_doc,
             commands::rebuild_project_subtitles,
             commands::update_subtitle_segment,
+            commands::assign_subtitle_voice_to_speaker,
             commands::add_subtitle_segment,
             commands::delete_subtitle_segment,
             commands::split_subtitle_segment,
@@ -139,6 +140,7 @@ pub fn run() {
             // Phase 6
             commands::get_tts_env,
             commands::list_tts_voices,
+            commands::create_tts_voice_profile,
             commands::list_recommended_tts_voices,
             commands::download_tts_voice,
             commands::get_project_tts_summary,

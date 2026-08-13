@@ -19,7 +19,6 @@ calls that never touch TTS.
 from __future__ import annotations
 
 import shutil
-import struct
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -30,7 +29,12 @@ from .models import SynthesisResult, TTSSettings, VoiceInfo
 from .provider import ProviderError, TTSProvider
 from .registry import list_piper_voices, resolve_piper_voice
 from .prosody import silence_pcm16, split_spoken_units
-from .wav_io import apply_volume_pcm16, probe_wav, write_pcm16_mono
+from .wav_io import (
+    inspect_pcm16_wav,
+    postprocess_pcm16_wav,
+    probe_wav,
+    write_pcm16_mono,
+)
 
 
 class PiperTTSProvider(TTSProvider):
@@ -103,11 +107,16 @@ class PiperTTSProvider(TTSProvider):
                 "piper produced an empty audio file",
             )
 
-        # Apply post-processing (volume) if the engine didn't handle it.
-        if abs(opts.volume - 1.0) > 1e-4:
-            self._apply_volume(dst, opts.volume)
+        postprocess_pcm16_wav(dst, volume=opts.volume)
 
         duration, sample_rate, channels = probe_wav(dst)
+        metrics = inspect_pcm16_wav(dst)
+        if duration <= 0.02 or float(metrics["rms"]) < 2.0:
+            dst.unlink(missing_ok=True)
+            raise ProviderError(
+                RpcErrorCode.TTS_ENGINE_FAILURE,
+                "piper produced silent or invalid audio",
+            )
         return SynthesisResult(
             file_path=str(dst),
             duration_secs=duration,
@@ -262,28 +271,3 @@ class PiperTTSProvider(TTSProvider):
                 RpcErrorCode.TTS_ENGINE_FAILURE,
                 "piper CLI failed: " + " | ".join(tail) if tail else "piper CLI failed",
             )
-
-    @staticmethod
-    def _apply_volume(dst: Path, volume: float) -> None:
-        import wave
-
-        with wave.open(str(dst), "rb") as r:
-            channels = r.getnchannels()
-            sampwidth = r.getsampwidth()
-            rate = r.getframerate()
-            frames = r.readframes(r.getnframes())
-        if sampwidth != 2:
-            # Piper always ships PCM16; if a future voice deviates we
-            # skip volume rather than corrupt the buffer.
-            return
-        # apply_volume_pcm16 works on interleaved PCM16 regardless of
-        # channel count.
-        _ = struct  # keep the import used for clarity above
-        scaled = apply_volume_pcm16(frames, float(volume))
-        tmp = dst.with_suffix(".tmp.wav")
-        with wave.open(str(tmp), "wb") as w:
-            w.setnchannels(channels)
-            w.setsampwidth(sampwidth)
-            w.setframerate(rate)
-            w.writeframes(scaled)
-        tmp.replace(dst)
