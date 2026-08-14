@@ -9,6 +9,7 @@ tests that don't touch the provider don't pay the cost.
 from __future__ import annotations
 
 import gc
+import traceback
 from pathlib import Path
 from typing import Any, Optional
 
@@ -172,6 +173,8 @@ class FasterWhisperProvider(SpeechToTextProvider):
                 device=device,
                 compute_type=compute_type,
                 error=str(e),
+                error_type=type(e).__name__,
+                tb=traceback.format_exc(limit=25),
             )
             raise ProviderError(
                 RpcErrorCode.STT_MODEL_LOAD_FAILED,

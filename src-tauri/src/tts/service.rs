@@ -72,6 +72,17 @@ struct TerminalEvent {
     error_message: Option<String>,
 }
 
+struct DeregisterOnDrop {
+    jobs: Arc<JobRegistry>,
+    id: String,
+}
+
+impl Drop for DeregisterOnDrop {
+    fn drop(&mut self) {
+        self.jobs.deregister(&self.id);
+    }
+}
+
 /// One segment queued for the worker along with the cache identity
 /// the host expects the worker to stamp on the returned manifest entry.
 struct TodoEntry {
@@ -220,6 +231,25 @@ impl TtsService {
         self: &Arc<Self>,
         preset: String,
     ) -> Result<JobSnapshot, TtsError> {
+        if let Some(existing) = self.jobs.find_active("", JobStage::Tts) {
+            tracing::info!(
+                id = %existing.id,
+                preset = %preset,
+                "reusing in-flight TTS download"
+            );
+            return Ok(JobSnapshot {
+                id: existing.id,
+                project_id: String::new(),
+                stage: JobStage::Tts,
+                status: JobStatus::Running,
+                progress: 0.0,
+                error_code: None,
+                error_message: None,
+                created_at: Utc::now(),
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            });
+        }
         let job_id = format!("job_{}", Uuid::new_v4().simple());
         let handle = self
             .jobs
@@ -281,6 +311,10 @@ impl TtsService {
         let jobs_for_dereg = self.jobs.clone();
         let job_id_bg = job_id.clone();
         tokio::spawn(async move {
+            let _slot = DeregisterOnDrop {
+                jobs: jobs_for_dereg,
+                id: job_id_bg.clone(),
+            };
             let result = this
                 .worker
                 .request_no_timeout_with_id(
@@ -291,7 +325,6 @@ impl TtsService {
                 .await;
             this.worker.unsubscribe(sub);
             this.finalize_download(&job_id_bg, result).await;
-            jobs_for_dereg.deregister(&job_id_bg);
         });
 
         Ok(snap)
@@ -1356,6 +1389,7 @@ fn tts_err_code(err: &TtsError) -> &'static str {
     match err {
         TtsError::NoSubtitles => "TTS_NO_SUBTITLES",
         TtsError::EngineUnavailable { .. } => "TTS_ENGINE_UNAVAILABLE",
+        TtsError::EngineRestarting { .. } => "TTS_ENGINE_RESTARTING",
         TtsError::VoiceMissing { .. } => "TTS_VOICE_MISSING",
         TtsError::ModelInvalid { .. } => "TTS_MODEL_INVALID",
         TtsError::InvalidText => "TTS_INVALID_TEXT",

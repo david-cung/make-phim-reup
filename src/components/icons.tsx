@@ -164,3 +164,41 @@ export const IconFolder = (p: IconProps) => (
     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
   </svg>
 );
+
+export const IconSkipBack = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M5 5v14M19 5 9 12l10 7V5Z" />
+  </svg>
+);
+
+export const IconSkipForward = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M19 5v14M5 5l10 7-10 7V5Z" />
+  </svg>
+);
+
+export const IconVolume = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M4 10v4h4l5 4V6L8 10H4Z" />
+    <path d="M16.5 8.5a5 5 0 0 1 0 7" />
+  </svg>
+);
+
+export const IconMaximize = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4" />
+  </svg>
+);
+
+export const IconCheck = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="m5 12 5 5L20 7" />
+  </svg>
+);
+
+export const IconAlert = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M12 9v5M12 17h.01" />
+    <path d="M10.3 4.7 2.4 18.2A1.6 1.6 0 0 0 3.8 20.5h16.4a1.6 1.6 0 0 0 1.4-2.3L13.7 4.7a1.6 1.6 0 0 0-3.4 0Z" />
+  </svg>
+);

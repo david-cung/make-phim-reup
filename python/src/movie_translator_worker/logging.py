@@ -27,14 +27,14 @@ def _current_level() -> int:
 _LEVEL = _current_level()
 
 
-def _log(level: str, message: str, **fields: Any) -> None:
+def _log(level: str, msg: str, **fields: Any) -> None:
     if _LEVELS.get(level, 100) < _LEVEL:
         return
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "level": level.lower(),
         "component": "worker",
-        "msg": message,
+        "msg": msg,
     }
     if fields:
         record.update(fields)

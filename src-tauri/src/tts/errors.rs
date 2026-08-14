@@ -19,6 +19,11 @@ pub enum TtsError {
     #[error("TTS engine {engine:?} is not available in the worker environment")]
     EngineUnavailable { engine: String },
 
+    /// The worker installed a Python runtime into its own environment and
+    /// is being respawned, so the request has to be issued again.
+    #[error("{reason}")]
+    EngineRestarting { reason: String },
+
     #[error("voice {voice_id:?} is not installed for engine {engine:?}")]
     VoiceMissing { engine: String, voice_id: String },
 
@@ -76,6 +81,11 @@ impl TtsError {
     pub fn from_rpc(err: RpcError) -> Self {
         match err.code.as_str() {
             "E_CANCELLED" => Self::Cancelled,
+            "TTS_ENGINE_UNAVAILABLE" if extract_bool(&err, "restarting") => {
+                Self::EngineRestarting {
+                    reason: err.message.clone(),
+                }
+            }
             "TTS_ENGINE_UNAVAILABLE" => Self::EngineUnavailable {
                 engine: extract_str(&err, "engine").unwrap_or_default(),
             },
@@ -112,6 +122,14 @@ fn extract_str(err: &RpcError, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn extract_bool(err: &RpcError, key: &str) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +152,21 @@ mod tests {
         ));
         match err {
             TtsError::UnknownPreset { preset } => assert_eq!(preset, "vi_VN-nope-low"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn maps_restarting_engine_to_its_own_variant() {
+        let err = TtsError::from_rpc(rpc(
+            "TTS_ENGINE_UNAVAILABLE",
+            "F5-TTS runtime installed. Restarting the local engine.",
+            Some(json!({"restarting": true, "runtimeInstalled": true})),
+        ));
+        match err {
+            TtsError::EngineRestarting { reason } => {
+                assert_eq!(reason, "F5-TTS runtime installed. Restarting the local engine.")
+            }
             _ => panic!("wrong variant"),
         }
     }

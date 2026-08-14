@@ -243,7 +243,7 @@ def test_transcribe_maps_provider_error(tmp_path: Path) -> None:
     frames = _drain(outbox)
     err = frames[-1]["error"]
     assert err["code"] == RpcErrorCode.STT_OUT_OF_MEMORY
-    assert err["data"] == {"recoverable": True}
+    assert err["data"] == {"recoverable": True, "model": "small"}
 
 
 def test_download_model_uses_injected_downloader(tmp_path: Path, monkeypatch) -> None:

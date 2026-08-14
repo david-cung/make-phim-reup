@@ -9,11 +9,12 @@ import {
   IconSettings,
   IconUndo,
 } from "./icons";
+import appIcon from "../assets/app-icon.png";
 
 // UI redesign — professional top bar shared by every screen.
 //
 // The topbar collapses into three horizontal zones (left / center /
-// right) at a fixed 52 px height. Each screen provides:
+// right) at a fixed 44 px height. Each screen provides:
 //   - `subject`  : brand block on the left (project name, "Dashboard",
 //                  "Settings", etc.).
 //   - `center`   : contextual controls (playhead time, tabs) — usually
@@ -44,6 +45,8 @@ export type TopBarProps = {
   exportLabel?: string;
   exportTitle?: string;
   exportBusy?: boolean;
+  saveStatus?: "saved" | "dirty" | "busy";
+  saveLabel?: string;
 };
 
 export function TopBar(props: TopBarProps) {
@@ -64,6 +67,8 @@ export function TopBar(props: TopBarProps) {
     exportLabel = "Export",
     exportTitle,
     exportBusy = false,
+    saveStatus,
+    saveLabel,
   } = props;
 
   return (
@@ -76,14 +81,35 @@ export function TopBar(props: TopBarProps) {
           </Link>
         )}
         <Link to="/" className="app-brand" title="Local Movie Translator">
-          <span className="brand-mark">LM</span>
-          <span>Movie Translator</span>
+          <span className="brand-mark">
+            <img src={appIcon} alt="" width={22} height={22} />
+          </span>
+          <span className="brand-title">Movie Translator</span>
         </Link>
         {subject ? (
           <>
             <span className="topbar-divider" />
             {subject}
           </>
+        ) : null}
+        {saveStatus ? (
+          <span
+            className={`save-status${
+              saveStatus === "dirty"
+                ? " is-dirty"
+                : saveStatus === "busy"
+                  ? " is-busy"
+                  : ""
+            }`}
+          >
+            <span className="save-dot" />
+            {saveLabel ??
+              (saveStatus === "dirty"
+                ? "Unsaved"
+                : saveStatus === "busy"
+                  ? "Working"
+                  : "Saved")}
+          </span>
         ) : null}
       </div>
 

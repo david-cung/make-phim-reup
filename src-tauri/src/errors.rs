@@ -439,6 +439,11 @@ impl From<TtsError> for AppError {
                     "Install the TTS engine in the worker Python environment (e.g. `pip install piper-tts`).",
                 ),
             ),
+            TtsError::EngineRestarting { .. } => (
+                "TTS_ENGINE_RESTARTING",
+                true,
+                Some("The local engine is reloading. Start the download again in a few seconds."),
+            ),
             TtsError::VoiceMissing { .. } => (
                 "TTS_VOICE_MISSING",
                 true,

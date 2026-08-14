@@ -351,6 +351,34 @@ def _parse_request(payload: Any) -> Request:
     return Request(id=payload.get("id"), method=method, params=params)
 
 
+# -------------------------------------------------------------------- restart
+
+
+# Anything but 0 so the host treats the exit as unplanned and respawns us.
+RESTART_EXIT_CODE = 87
+
+
+def request_restart(reason: str, *, delay_secs: float = 1.0) -> None:
+    """Exit soon so the host respawns a clean worker process.
+
+    Installing a Python extra into the environment this process is
+    running from leaves a mix of old (in memory) and new (on disk)
+    modules behind: later imports then fail in ways that have nothing to
+    do with the caller — a Whisper load raising ``RecursionError``, for
+    example. Callers raise a recoverable error first and let the
+    supervisor start over.
+
+    The delay gives the writer thread time to flush that error frame.
+    """
+    log.warn("worker restart requested", reason=reason, delay_secs=delay_secs)
+
+    def _exit() -> None:
+        time.sleep(delay_secs)
+        os._exit(RESTART_EXIT_CODE)
+
+    threading.Thread(target=_exit, name="worker-restart", daemon=True).start()
+
+
 # ---------------------------------------------------------------------- serve
 
 

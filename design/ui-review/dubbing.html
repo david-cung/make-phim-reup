@@ -1,0 +1,234 @@
+<!doctype html>
+<!--
+  Static visual-review harness for the Voices section. Two stacked groups
+  (TTS / Dubbing + Voice sync) inside one scrolling work pane — the layout
+  that regressed into overlapping content.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dubbing &amp; sync — visual review</title>
+    <link rel="stylesheet" href="../../src/styles/global.css" />
+    <style>
+      html, body, #root { height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="app-shell has-status">
+        <header class="topbar">
+          <div class="topbar-left">
+            <a class="app-brand"><span class="brand-mark"></span><span class="brand-title">Movie Translator</span></a>
+            <span class="topbar-divider"></span>
+            <div class="topbar-project">
+              <span class="pname">Mountain Road (2019) 4K</span>
+              <span class="pmeta">EN → VI</span>
+            </div>
+            <span class="save-status"><span class="save-dot"></span>Saved</span>
+          </div>
+          <div class="topbar-center"></div>
+          <div class="topbar-right">
+            <div class="worker-badge worker-badge--ok"><span class="worker-dot"></span><span class="worker-label">Worker ready</span></div>
+            <button class="btn">Run all</button>
+            <button class="btn primary">Export</button>
+          </div>
+        </header>
+
+        <main class="app-body">
+          <div class="download-status-slot is-empty"></div>
+
+          <aside class="navcol">
+            <nav class="nav">
+              <div class="nav-group">
+                <div class="nav-group-title">Workspace</div>
+                <button class="nav-item"><span class="nav-icon">▣</span><span class="nav-label">Media</span><span class="nav-state nav-state--done"></span></button>
+                <button class="nav-item"><span class="nav-icon">≡</span><span class="nav-label">Subtitles</span><span class="nav-state nav-state--done"></span></button>
+                <button class="nav-item active"><span class="nav-icon">◍</span><span class="nav-label">Voices</span><span class="nav-state nav-state--active"></span></button>
+                <button class="nav-item"><span class="nav-icon">◫</span><span class="nav-label">Mix</span><span class="nav-state"></span></button>
+              </div>
+            </nav>
+            <div class="nav-browser">
+              <div class="panel-head"><span class="panel-head-title">Voices</span></div>
+              <div class="nav-browser-body">
+                <div class="sidepane-group-title">Status</div>
+                <div class="asset-empty">No voice profile yet.</div>
+              </div>
+            </div>
+          </aside>
+
+          <div class="workspace">
+            <div class="workspace-center">
+              <div class="workspace-split is-form-first">
+                <div class="stage">
+                  <div class="stage-canvas"></div>
+                  <div class="stage-toolbar">
+                    <div class="stage-toolbar-left">
+                      <button class="icon-btn">▶</button>
+                      <span class="tc">00:12:32<span class="tc-sep"> / </span>02:49:03</span>
+                    </div>
+                    <input class="stage-scrubber" type="range" value="14" />
+                    <div class="stage-toolbar-right"><button class="icon-btn">⛶</button></div>
+                  </div>
+                </div>
+
+                <div class="workpane">
+                  <div class="workpane-header">
+                    <span class="workpane-title">Dubbing &amp; Sync</span>
+                    <span class="status-badge err">Error</span>
+                  </div>
+                  <div class="workpane-body">
+                    <div class="panel">
+                      <h3>TTS / Dubbing</h3>
+                      <div class="panel-body">
+                        <div class="tts-panel">
+                          <div class="form-section">
+                            <div class="form-section-title">Engine</div>
+                            <div class="tts-models" role="radiogroup">
+                              <label class="tts-model tts-model--active">
+                                <input type="radio" name="m" checked />
+                                <span>
+                                  <b>F5-TTS Vietnamese ViVoice (~5.45 GB, non-commercial)</b>
+                                  <span class="tts-model-meta">High quality · GPU recommended · 5.1 GB · non-commercial</span>
+                                  <span class="tts-model-tags"><span class="badge">QUALITY</span><span class="badge">quality</span></span>
+                                </span>
+                                <span class="status-badge tts-model-status ok">Installed</span>
+                              </label>
+                              <label class="tts-model">
+                                <input type="radio" name="m" />
+                                <span>
+                                  <b>Piper — Chinese (huayan, medium, ~63 MB)</b>
+                                  <span class="tts-model-meta">Fast · Lightweight · 60.1 MB</span>
+                                  <span class="tts-model-tags"><span class="badge">FAST</span><span class="badge">medium</span></span>
+                                </span>
+                                <span class="status-badge tts-model-status err">Not installed — will download</span>
+                              </label>
+                              <label class="tts-model">
+                                <input type="radio" name="m" />
+                                <span>
+                                  <b>Piper — English US (libritts_r, medium, ~63 MB)</b>
+                                  <span class="tts-model-meta">Fast · Lightweight · 60.1 MB</span>
+                                  <span class="tts-model-tags"><span class="badge">FAST</span><span class="badge">medium</span></span>
+                                </span>
+                                <span class="status-badge tts-model-status err">Not installed — will download</span>
+                              </label>
+                            </div>
+                          </div>
+
+                          <div class="banner banner--info small">
+                            <b>QUALITY needs a reference voice.</b> F5 clones the voice
+                            from a clip you provide: pick a clean 5–15s WAV of the target
+                            voice and type its exact transcript below.
+                          </div>
+
+                          <div class="form-section">
+                            <div class="form-section-title">Reference voice profile</div>
+                            <div class="tts-grid">
+                              <label><span>Profile ID</span><input placeholder="character-01" /></label>
+                              <label><span>Display name</span><input placeholder="Vietnamese Male 01" /></label>
+                              <label><span>Gender</span><select><option>Unspecified</option></select></label>
+                              <label><span>Emotion metadata</span><select><option>neutral</option></select></label>
+                              <label><span>Style metadata</span><input placeholder="default" /></label>
+                              <label><span>Reference WAV</span><div class="path-row"><input readonly /><button class="btn ghost small">Browse</button></div></label>
+                              <label class="tts-reference-text"><span>Exact reference transcript</span><textarea placeholder="Transcript matching the reference WAV exactly…"></textarea></label>
+                              <div class="tts-actions"><button class="btn primary" disabled>Create local voice profile</button></div>
+                            </div>
+                          </div>
+
+                          <div class="form-section">
+                            <div class="form-section-title">Voice &amp; delivery</div>
+                            <div class="tts-grid">
+                              <label><span>Voice <button class="btn ghost small tts-rescan">Rescan</button></span><select><option>No voices installed</option></select></label>
+                              <label><span>Compute device</span><select><option>Auto (mps)</option></select></label>
+                              <label><span>Speed (1.00×)</span><input type="range" value="50" /></label>
+                              <label><span>Volume (100%)</span><input type="range" value="50" /></label>
+                            </div>
+                          </div>
+
+                          <details class="disclosure"><summary>Runtime environment</summary></details>
+
+                          <div class="banner banner--warn small">
+                            F5-TTS ViVoice is licensed CC-BY-NC-SA-4.0 for non-commercial use. It is not bundled with the app and QUALITY never falls back to Piper.
+                          </div>
+
+                          <div class="tts-actions">
+                            <button class="btn primary" disabled>Generate missing</button>
+                            <button class="btn" disabled>Regenerate all</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="panel">
+                      <h3>Voice sync</h3>
+                      <div class="panel-body">
+                        <div class="sync-panel">
+                          <div class="sync-grid">
+                            <label><span>Min speed (0.88×)</span><input type="range" value="20" /></label>
+                            <label><span>Max speed (1.12×)</span><input type="range" value="60" /></label>
+                            <label><span>Channels</span><select><option>Mono (1)</option></select></label>
+                          </div>
+                          <div class="sync-env small">
+                            <div><span>FFmpeg</span> <code class="mono small">/opt/ffmpeg-full/bin/ffmpeg</code></div>
+                          </div>
+                          <div class="sync-summary">
+                            <div class="kv-row"><span>Coverage</span><b>0/16 synced · 16 missing</b></div>
+                            <div class="kv-row"><span>Fit breakdown</span><b>✓ 0 fits · ⚠ 0 adjusted · ⚠ 0 too long</b></div>
+                            <div class="kv-row"><span>Manifest</span><b class="mono small">voices/synced/sync.json</b></div>
+                          </div>
+                          <div class="tts-actions">
+                            <button class="btn" disabled>Sync missing</button>
+                            <button class="btn primary" disabled>Sync all</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="timeline on-canvas">
+              <div class="timeline-header">
+                <div class="timeline-title"><span class="timeline-label">Timeline</span></div>
+              </div>
+              <div class="timeline-body">
+                <div class="tracks-labels">
+                  <div class="track-label"><span class="track-swatch video"></span><span class="track-name">V1 Video</span></div>
+                  <div class="track-label"><span class="track-swatch audio"></span><span class="track-name">A1 Audio</span></div>
+                  <div class="track-label"><span class="track-swatch voice"></span><span class="track-name">A2 Voice</span></div>
+                  <div class="track-label"><span class="track-swatch subtitle"></span><span class="track-name">S1 Subs</span></div>
+                </div>
+                <div class="tracks-canvas">
+                  <div style="width:2400px;position:relative">
+                    <div class="ruler" style="width:2400px"></div>
+                    <div class="track-lanes">
+                      <div class="track-lane"><div class="track-clip video" style="left:0;width:2400px">Video track</div></div>
+                      <div class="track-lane"><div class="track-clip audio" style="left:0;width:2400px">Original audio</div></div>
+                      <div class="track-lane"></div>
+                      <div class="track-lane"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="inspector">
+            <div class="panel-head"><span class="panel-head-title">Project</span></div>
+            <div class="inspector-body">
+              <div class="section">
+                <div class="section-title">Voice model</div>
+                <label class="field"><span>TTS / dubbing</span><select><option>F5-TTS Vietnamese ViVoice</option></select></label>
+              </div>
+            </div>
+          </aside>
+        </main>
+
+        <footer class="statusbar">
+          <div class="statusbar-left"><span class="statusbar-job"><span class="state-dot state-dot--missing"></span>Voice profile required</span></div>
+          <div class="statusbar-right"><span class="statusbar-tc">00:12:32 / 02:49:03</span></div>
+        </footer>
+      </div>
+    </div>
+  </body>
+</html>

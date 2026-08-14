@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- Static visual-review harness for the project hub (see editor.html). -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Project hub — visual review</title>
+    <link rel="stylesheet" href="../../src/styles/global.css" />
+    <style>html, body, #root { height: 100%; }</style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="app-shell">
+        <header class="topbar">
+          <div class="topbar-left">
+            <a class="app-brand"><span class="brand-mark"></span><span class="brand-title">Movie Translator</span></a>
+          </div>
+          <div class="topbar-center"></div>
+          <div class="topbar-right">
+            <div class="worker-badge worker-badge--ok"><span class="worker-dot"></span><span class="worker-label">Worker ready</span></div>
+            <button class="btn icon">⚙</button>
+            <button class="btn primary">＋ New Project</button>
+          </div>
+        </header>
+        <main class="app-body plain">
+          <div class="plain-scroll">
+            <section class="hub-section">
+              <div class="hub-section-head">
+                <h2>Recent projects</h2>
+                <span class="hub-count">4 projects</span>
+              </div>
+              <div class="hub-grid" id="grid"></div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+    <script>
+      const items = [
+        ["Mountain Road (2019) 4K", "EN → VI", "Edited 2h ago", "ready"],
+        ["Harbour Lights — episode 3", "JA → VI", "Edited yesterday", "draft"],
+        ["Workshop interview", "EN → VI", "Edited 4d ago", "error"],
+        ["Nature documentary reel", "FR → VI", "Edited Aug 10", "draft"],
+      ];
+      const grid = document.getElementById("grid");
+      items.forEach(([name, langs, when, status]) => {
+        const el = document.createElement("article");
+        el.className = "proj-tile";
+        el.innerHTML = `
+          <a class="proj-thumb"><span class="proj-chip proj-chip--${status}">${status}</span></a>
+          <div class="proj-info">
+            <a class="proj-name">${name}</a>
+            <div class="proj-meta"><span class="mono">${langs}</span><span class="proj-dot"></span><span>${when}</span></div>
+          </div>
+          <button class="btn icon proj-del">🗑</button>`;
+        grid.appendChild(el);
+      });
+      const add = document.createElement("button");
+      add.className = "proj-tile proj-tile--new";
+      add.innerHTML = `<span class="proj-new-mark">＋</span><span class="proj-new-label">New project</span><span class="proj-new-hint">Import a movie to start</span>`;
+      grid.appendChild(add);
+    </script>
+  </body>
+</html>

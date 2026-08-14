@@ -17,13 +17,17 @@ import {
   IconExport,
   IconFolder,
   IconLayers,
+  IconMaximize,
   IconMedia,
   IconMic,
   IconPause,
   IconPlay,
   IconSettings,
+  IconSkipBack,
+  IconSkipForward,
   IconSparkles,
   IconSubtitles,
+  IconVolume,
   IconWaveform,
   IconZoomIn,
   IconZoomOut,
@@ -141,6 +145,194 @@ function findLatestDownloadJobId(
   const pool = withinWindow.length > 0 ? withinWindow : candidates;
   pool.sort((a, b) => parseTs(b.createdAt) - parseTs(a.createdAt));
   return pool[0]?.id ?? null;
+}
+
+function ttsPresetInstalled(
+  preset: TtsRecommendedVoicePreset,
+  voices: VoiceInfo[],
+  env: TtsEnv | null,
+): boolean {
+  if (preset.engine === "f5-vietnamese") {
+    return !!env?.f5RuntimeInstalled && !!env?.f5Model.installed;
+  }
+  return voices.some(
+    (voice) => voice.id === preset.voiceId && voice.engine === preset.engine,
+  );
+}
+
+function ttsPresetSelected(
+  preset: TtsRecommendedVoicePreset,
+  engine: string,
+  voiceId: string,
+): boolean {
+  if (preset.engine === "f5-vietnamese") {
+    return engine === "f5-vietnamese";
+  }
+  return engine === preset.engine && voiceId === preset.voiceId;
+}
+
+function ttsModelDisplayLabel(
+  engine: string,
+  voiceId: string,
+  presets: TtsRecommendedVoicePreset[],
+  voices: VoiceInfo[],
+): string {
+  const preset = presets.find((item) =>
+    ttsPresetSelected(item, engine, voiceId),
+  );
+  if (preset) return preset.label;
+  const voice = voices.find((item) => item.id === voiceId);
+  if (voice) return `${voice.name} · ${voice.language}`;
+  if (engine === "f5-vietnamese") return "F5-TTS Vietnamese (no voice profile)";
+  return "No TTS model selected";
+}
+
+const WORKFLOW_SECTION: Record<string, EditorSection> = {
+  import: "media",
+  extract: "media",
+  transcribe: "transcription",
+  translate: "translation",
+  tts: "voices",
+  sync: "voices",
+  mix: "mix",
+  render: "render",
+};
+
+function TtsModelPicker(props: {
+  presets: TtsRecommendedVoicePreset[];
+  voices: VoiceInfo[];
+  env: TtsEnv | null;
+  engine: string;
+  voiceId: string;
+  disabled?: boolean;
+  downloading?: boolean;
+  downloadProgress?: number;
+  onSelect: (preset: TtsRecommendedVoicePreset) => void;
+  onCancelDownload?: () => void;
+}) {
+  const selected =
+    props.presets.find((preset) =>
+      ttsPresetSelected(preset, props.engine, props.voiceId),
+    ) ?? null;
+  const pct = Math.round(
+    Math.max(0, Math.min(1, props.downloadProgress ?? 0)) * 100,
+  );
+  const status = describeTtsDownload(props.engine, props.downloadProgress ?? 0);
+  return (
+    <label className="tts-model-picker">
+      <span>Voice model</span>
+      <select
+        value={selected?.preset ?? ""}
+        disabled={props.disabled || props.downloading}
+        onChange={(event) => {
+          const preset = props.presets.find(
+            (item) => item.preset === event.target.value,
+          );
+          if (preset) props.onSelect(preset);
+        }}
+      >
+        {!selected && (
+          <option value="">
+            {props.downloading
+              ? `${status.title}… ${pct}%`
+              : ttsModelDisplayLabel(
+                  props.engine,
+                  props.voiceId,
+                  props.presets,
+                  props.voices,
+                )}
+          </option>
+        )}
+        {props.presets.map((preset) => {
+          const installed = ttsPresetInstalled(
+            preset,
+            props.voices,
+            props.env,
+          );
+          return (
+            <option key={preset.preset} value={preset.preset}>
+              {preset.label}
+              {installed ? "" : " — will download"}
+            </option>
+          );
+        })}
+      </select>
+      {props.downloading && (
+        <div className="tts-model-picker-progress">
+          <div className="tts-model-picker-progress-row">
+            <span>
+              {status.title} · {pct}%
+            </span>
+            {props.onCancelDownload && (
+              <button
+                className="btn tiny danger"
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  props.onCancelDownload?.();
+                }}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      )}
+    </label>
+  );
+}
+
+function describeTtsDownload(
+  engine: string,
+  progress: number,
+): { title: string; detail: string } {
+  if (engine === "f5-vietnamese") {
+    if (progress < 0.13) {
+      return {
+        title: "Installing F5-TTS runtime",
+        detail:
+          "Downloading PyTorch and F5-TTS into the worker. This can take several minutes — keep the app open.",
+      };
+    }
+    return {
+      title: "Downloading F5-TTS Vietnamese model",
+      detail: "About 5.45 GB, one-time. Synthesis stays offline afterwards.",
+    };
+  }
+  return {
+    title: "Downloading voice model",
+    detail: "One-time download. Synthesis stays offline afterwards.",
+  };
+}
+
+function StickyJobBanner(props: {
+  title: string;
+  detail: string;
+  progress: number;
+  onCancel: () => void;
+}) {
+  const pct = Math.round(Math.max(0, Math.min(1, props.progress)) * 100);
+  return (
+    <div className="sticky-job-banner" role="status" aria-live="polite">
+      <div className="sticky-job-banner-copy">
+        <b>{props.title}</b>
+        <span>{props.detail}</span>
+      </div>
+      <div className="sticky-job-banner-meter">
+        <div className="progress-track">
+          <div className="progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+        <span className="mono">{pct}%</span>
+      </div>
+      <button className="btn tiny danger" type="button" onClick={props.onCancel}>
+        Cancel
+      </button>
+    </div>
+  );
 }
 
 // Phase 12 UX — resolve when the given job reaches a terminal state
@@ -280,7 +472,6 @@ export default function ProjectView() {
   const ttsVoices = useAppStore((s) => s.ttsVoices);
   const ttsManifest = useAppStore((s) => s.currentTtsManifest);
   const ttsEngine = useAppStore((s) => s.ttsEngine);
-  const ttsQualityMode = useAppStore((s) => s.ttsQualityMode);
   const ttsVoiceId = useAppStore((s) => s.ttsVoiceId);
   const ttsSettings = useAppStore((s) => s.ttsSettings);
   const lastTtsPreview = useAppStore((s) => s.lastTtsPreview);
@@ -289,7 +480,6 @@ export default function ProjectView() {
   const loadTtsManifest = useAppStore((s) => s.loadTtsManifest);
   const refreshTtsSummary = useAppStore((s) => s.refreshTtsSummary);
   const setTtsEngine = useAppStore((s) => s.setTtsEngine);
-  const setTtsQualityMode = useAppStore((s) => s.setTtsQualityMode);
   const setTtsVoiceId = useAppStore((s) => s.setTtsVoiceId);
   const setTtsSettings = useAppStore((s) => s.setTtsSettings);
   const previewTts = useAppStore((s) => s.previewTts);
@@ -687,6 +877,10 @@ export default function ProjectView() {
   // a re-render.
   const [pipelineStep, setPipelineStep] = useState<string | null>(null);
   const pipelineAbortRef = useRef(false);
+  // Export is a separate, explicit user decision now: "Run all" stops at
+  // the mix, then this dialog asks where the movie should go — a local
+  // file or a social destination like YouTube.
+  const [exportOpen, setExportOpen] = useState(false);
 
   const subtitleById = useMemo(
     () =>
@@ -843,6 +1037,32 @@ export default function ProjectView() {
     if (!el) return;
     if (el.paused) void el.play();
     else el.pause();
+  };
+  const skipCue = useCallback(
+    (dir: -1 | 1) => {
+      const segs = subtitleDoc?.segments ?? [];
+      const duration = media?.metadata?.durationSecs ?? Number.POSITIVE_INFINITY;
+      if (segs.length === 0) {
+        seekVideo(Math.min(duration, Math.max(0, videoTime + dir * 5)));
+        return;
+      }
+      if (dir < 0) {
+        const prev = [...segs]
+          .reverse()
+          .find((s) => s.start < videoTime - 0.08);
+        seekVideo(prev ? prev.start : 0);
+      } else {
+        const next = segs.find((s) => s.start > videoTime + 0.08);
+        seekVideo(next ? next.start : Math.min(duration, videoTime + 5));
+      }
+    },
+    [media?.metadata?.durationSecs, seekVideo, subtitleDoc, videoTime],
+  );
+  const toggleFullscreen = () => {
+    const stage = document.querySelector(".stage");
+    if (!stage) return;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void stage.requestFullscreen();
   };
 
   if (loadError) {
@@ -1346,52 +1566,31 @@ export default function ProjectView() {
     }
   };
 
-  /// Phase 12 UX — parity with `handleTranscribe` /
-  /// `handleTranslate`. If the user has no Piper voice installed
-  /// (fresh project, no manual GGUF drop) we transparently pull the
-  /// preset that best matches the project's target language before
-  /// starting synthesis. Returns `true` iff callers should proceed
-  /// with generation, `false` if the user cancelled or nothing is
-  /// installable.
-  const ensureTtsVoiceReady = async (): Promise<boolean> => {
-    if (
-      ttsVoiceId &&
-      ttsVoices.some((v) => v.id === ttsVoiceId && v.engine === ttsEngine)
-    ) {
-      return true;
-    }
-    if (ttsVoiceId) {
-      throw new Error(
-        `The selected voice "${ttsVoiceId}" is not installed for ${ttsEngine}. Rescan or choose another voice; it will not be replaced automatically.`,
-      );
-    }
-    if (ttsEngine === "f5-vietnamese") {
-      if (!ttsEnv?.f5RuntimeInstalled) {
-        throw new Error(
-          "F5-TTS runtime is not installed. Run scripts/setup-f5.ps1 first.",
-        );
-      }
-      if (!ttsEnv.f5Model.installed) {
-        throw new Error(
-          "F5-TTS QUALITY model is not installed. Install it explicitly in Voice Over settings.",
-        );
-      }
-      throw new Error(
-        "Create and select an F5 reference voice profile before generating. QUALITY never falls back to Piper automatically.",
-      );
-    }
-    const targetLang = (project?.targetLanguage || "vi").toLowerCase();
-    const enginePresets = ttsRecommendedVoices.filter(
-      (candidate) => candidate.engine === ttsEngine,
+  const downloadTtsPreset = async (
+    preset: TtsRecommendedVoicePreset,
+  ): Promise<boolean> => {
+    const inflight = Object.values(useAppStore.getState().jobsById).find(
+      (job) =>
+        !job.projectId &&
+        job.stage === "tts" &&
+        (job.status === "running" || job.status === "queued"),
     );
-    const preset =
-      enginePresets.find((p) => p.targetLanguages.includes(targetLang)) ??
-      enginePresets.find((p) => p.isDefault) ??
-      enginePresets[0];
-    if (!preset) {
-      throw new Error(
-        "No TTS voice is installed and no recommended presets are available. Drop a Piper .onnx voice into <models>/tts/piper/ manually.",
-      );
+    if (inflight) {
+      const result = await waitForJobTerminal(inflight.id);
+      if (result.status === "cancelled") {
+        const err = new Error("cancelled");
+        (err as { code?: string }).code = "USER_CANCELLED";
+        throw err;
+      }
+      if (result.status === "failed") {
+        throw new Error(
+          result.errorMessage ||
+            `Voice download failed (${preset.label}${
+              result.errorCode ? ` — ${result.errorCode}` : ""
+            }).`,
+        );
+      }
+      return true;
     }
     const startedAt = Date.now();
     const runDownload = async () => {
@@ -1419,10 +1618,10 @@ export default function ProjectView() {
       } catch (dlErr) {
         if (isAppError(dlErr) && dlErr.code === "MODEL_NETWORK_DISABLED") {
           const proceed = window.confirm(
-            `To download the voice "${preset.label}", the app needs one-time network access.\n\n` +
+            `To download "${preset.label}", the app needs one-time network access.\n\n` +
               `Offline Mode is currently ON, which is blocking the download.\n\n` +
               `Turn Offline Mode OFF and download now?\n` +
-              `(You can turn it back on in Settings once the download finishes — the voice works fully offline afterwards.)`,
+              `(You can turn it back on in Settings once the download finishes — it works fully offline afterwards.)`,
           );
           if (!proceed) return false;
           await updateSettings({ offlineMode: false });
@@ -1435,6 +1634,119 @@ export default function ProjectView() {
       if ((e as { code?: string })?.code === "USER_CANCELLED") return false;
       throw e;
     }
+    return true;
+  };
+
+  const handleSelectTtsModel = async (preset: TtsRecommendedVoicePreset) => {
+    setError(null);
+    setTtsEngine(preset.engine);
+    if (preset.voiceId) {
+      setTtsVoiceId(preset.voiceId);
+    }
+    const envNow = useAppStore.getState().ttsEnv;
+    const voicesNow = useAppStore.getState().ttsVoices;
+    if (ttsPresetInstalled(preset, voicesNow, envNow)) {
+      return;
+    }
+    if (preset.engine === "f5-vietnamese") {
+      const needsRuntime = !envNow?.f5RuntimeInstalled;
+      const needsModel = !envNow?.f5Model.installed;
+      const proceed = window.confirm(
+        `Install ${preset.label}?\n\n` +
+          (needsRuntime
+            ? "This will install the F5-TTS runtime (PyTorch) into the worker, then "
+            : "This will ") +
+          (needsModel
+            ? `download the voice model (${humanBytes(preset.approxSizeBytes)}).`
+            : "finish runtime setup.") +
+          `\n\nLicense: ${preset.license ?? "see model card"}` +
+          `${preset.commercialUse === false ? " (non-commercial)" : ""}.\n` +
+          `One-time download; synthesis stays offline afterwards.`,
+      );
+      if (!proceed) return;
+    }
+    try {
+      const ok = await downloadTtsPreset(preset);
+      if (!ok) return;
+      await refreshTtsEnv();
+      const fresh = await refreshTtsVoices();
+      if (preset.voiceId) {
+        const installed = fresh.find((voice) => voice.id === preset.voiceId);
+        if (installed) setTtsVoiceId(installed.id);
+      }
+    } catch (e) {
+      if ((e as { code?: string })?.code === "USER_CANCELLED") return;
+      setError(formatError(e));
+    }
+  };
+
+  /// Phase 12 UX — parity with `handleTranscribe` /
+  /// `handleTranslate`. If the selected catalog model is not on disk
+  /// yet, download it (Piper voice or F5 checkpoint) before synthesis.
+  /// Returns `true` iff callers should proceed with generation.
+  const ensureTtsVoiceReady = async (): Promise<boolean> => {
+    if (
+      ttsVoiceId &&
+      ttsVoices.some((v) => v.id === ttsVoiceId && v.engine === ttsEngine)
+    ) {
+      return true;
+    }
+
+    const targetLang = (project?.targetLanguage || "vi").toLowerCase();
+    const enginePresets = ttsRecommendedVoices.filter(
+      (candidate) => candidate.engine === ttsEngine,
+    );
+    const preset =
+      enginePresets.find((p) => p.voiceId && p.voiceId === ttsVoiceId) ??
+      enginePresets.find((p) => p.engine === "f5-vietnamese") ??
+      enginePresets.find((p) => p.targetLanguages.includes(targetLang)) ??
+      enginePresets.find((p) => p.isDefault) ??
+      enginePresets[0];
+
+    if (ttsEngine === "f5-vietnamese") {
+      if (!ttsEnv?.f5RuntimeInstalled || !ttsEnv.f5Model.installed) {
+        const f5Preset =
+          ttsRecommendedVoices.find((p) => p.preset === "f5-vietnamese-vivoice") ??
+          preset;
+        if (!f5Preset) {
+          throw new Error(
+            "F5-TTS QUALITY model is not installed and no download preset is available.",
+          );
+        }
+        const ok = await downloadTtsPreset(f5Preset);
+        if (!ok) return false;
+        await refreshTtsEnv();
+      }
+      const fresh = await refreshTtsVoices();
+      const profile =
+        fresh.find((v) => v.id === ttsVoiceId && v.engine === ttsEngine) ??
+        fresh.find((v) => v.engine === ttsEngine);
+      if (!profile) {
+        // Send the user to the form that unblocks them instead of only
+        // naming what is missing.
+        setSection("voices");
+        throw new Error(
+          "QUALITY clones a voice from a reference clip, so it needs a voice profile first. Fill in “Reference voice profile” under Dubbing & Sync (a clean 5–15s WAV of the target voice plus its exact transcript), then generate again. QUALITY never falls back to Piper.",
+        );
+      }
+      if (profile.id !== ttsVoiceId) {
+        setTtsVoiceId(profile.id);
+      }
+      return true;
+    }
+
+    if (ttsVoiceId && !preset) {
+      throw new Error(
+        `The selected voice "${ttsVoiceId}" is not installed for ${ttsEngine}. Rescan or choose another voice; it will not be replaced automatically.`,
+      );
+    }
+    if (!preset) {
+      throw new Error(
+        "No TTS voice is installed and no recommended presets are available. Drop a Piper .onnx voice into <models>/tts/piper/ manually.",
+      );
+    }
+    const ok = await downloadTtsPreset(preset);
+    if (!ok) return false;
     const fresh = await refreshTtsVoices();
     const installed =
       fresh.find((v) => v.id === preset.voiceId) ??
@@ -1445,11 +1757,6 @@ export default function ProjectView() {
         `Voice ${preset.voiceId} did not appear installed after download.`,
       );
     }
-    // The store's `refreshTtsVoices` already auto-selects the first
-    // voice when `ttsVoiceId` is empty, but we set it explicitly
-    // too so a subsequent generate call sees the right id even in
-    // the edge case where the store ran the auto-select against an
-    // older snapshot.
     if (installed.id !== ttsVoiceId) {
       setTtsVoiceId(installed.id);
     }
@@ -1679,11 +1986,18 @@ export default function ProjectView() {
     setRenderSettings({ outputPath: null });
   };
 
-  // Export CTA in the topbar. Pick the destination first; cancelling the
-  // native dialog must not start an expensive pipeline. Once confirmed,
-  // store the absolute path in render settings before driving every
-  // missing stage through to the final movie.
-  const handleExport = async () => {
+  const revealPublishPanel = () => {
+    setSection("render");
+    requestAnimationFrame(() => {
+      document
+        .getElementById("panel-render")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
+  // Export to a file on this machine. Pick the destination first —
+  // cancelling the native dialog must not start an expensive render.
+  const handleExportLocal = async () => {
     if (!project.sourceMediaPath) {
       setError("Import a video before exporting.");
       setSection("media");
@@ -1692,16 +2006,29 @@ export default function ProjectView() {
     try {
       const outputPath = await chooseRenderOutputPath();
       if (!outputPath) return;
-
-      setSection("render");
-      requestAnimationFrame(() => {
-        document
-          .getElementById("panel-render")
-          ?.scrollIntoView({ behavior: "smooth", block: "start" });
-      });
-      await runPipeline({ upTo: "render" });
+      revealPublishPanel();
+      await runPipeline({ includeRender: true });
     } catch (e) {
       setError(formatError(e));
+    }
+  };
+
+  // Export for social publishing. YouTube uploads the rendered file, so
+  // make sure one exists (rendering to the default output location when
+  // the user never picked a path) before opening the publish panel.
+  const handleExportSocial = async () => {
+    if (!project.sourceMediaPath) {
+      setError("Import a video before exporting.");
+      setSection("media");
+      return;
+    }
+    revealPublishPanel();
+    if (media?.render?.status === "ready") return;
+    const ok = await runPipeline({ includeRender: true });
+    if (ok) {
+      setNotice(
+        "Render ready — fill in the details below and publish to YouTube.",
+      );
     }
   };
 
@@ -1766,13 +2093,19 @@ export default function ProjectView() {
     return true;
   };
 
-  const runPipeline = async (opts?: { upTo?: "render" }) => {
+  // Runs every stage up to the audio mix. Rendering the final movie is
+  // deliberately *not* part of it — that is the export step, which the
+  // user triggers once they know where the movie should go. Pass
+  // `includeRender` to drive the chain all the way to a file.
+  const runPipeline = async (options?: {
+    includeRender?: boolean;
+  }): Promise<boolean> => {
     if (!project.sourceMediaPath) {
       setError("Import a video first, then run the pipeline.");
       setSection("media");
-      return;
+      return false;
     }
-    if (pipelineStep) return;
+    if (pipelineStep) return false;
     pipelineAbortRef.current = false;
     setError(null);
     setNotice(null);
@@ -1786,14 +2119,14 @@ export default function ProjectView() {
       setPipelineStep("Extracting audio");
       setSection("media");
       const audioReady = await ensureAudioExtracted();
-      if (!audioReady) return;
+      if (!audioReady) return false;
       throwIfAborted();
 
       if (!fresh()?.transcript) {
         setPipelineStep("Transcribing");
         setSection("transcription");
         const modelReady = await ensureWhisperModelReady();
-        if (!modelReady) return;
+        if (!modelReady) return false;
         if (await runStage("transcribe", () =>
           startTranscribe(project.id, sttOptions),
         )) {
@@ -1808,7 +2141,7 @@ export default function ProjectView() {
         setPipelineStep("Translating");
         setSection("translation");
         const opts = await ensureTranslationModelReady();
-        if (!opts) return;
+        if (!opts) return false;
         if (await runStage("translate", () => startTranslate(project.id, opts))) {
           ranSomething = true;
         }
@@ -1830,7 +2163,7 @@ export default function ProjectView() {
       setPipelineStep("Generating voice");
       setSection("voices");
       const voiceReady = await ensureTtsVoiceReady();
-      if (!voiceReady) return;
+      if (!voiceReady) return false;
       if (
         await runStage("tts", () =>
           startGenerateTts(project.id, { kind: "missing" }),
@@ -1854,16 +2187,27 @@ export default function ProjectView() {
         ? true
         : ranSomething;
 
-      setPipelineStep("Rendering movie");
-      setSection("render");
-      ranSomething = (await runStage("render", () =>
-        startApplyRender(project.id, {}),
-      ))
-        ? true
-        : ranSomething;
+      if (options?.includeRender) {
+        setPipelineStep("Rendering movie");
+        setSection("render");
+        ranSomething = (await runStage("render", () =>
+          startApplyRender(project.id, {}),
+        ))
+          ? true
+          : ranSomething;
+      }
 
       setPipelineStep(null);
       await useAppStore.getState().refreshMedia(project.id);
+
+      if (!options?.includeRender) {
+        setNotice(
+          ranSomething
+            ? "Processing finished — the dubbed audio is mixed and ready. Click Export to save the movie or publish it."
+            : "Already up to date — everything is mixed and ready. Click Export to save the movie or publish it.",
+        );
+        return true;
+      }
 
       const out = useAppStore.getState().currentMedia?.render;
       if (out?.absolutePath) {
@@ -1872,21 +2216,30 @@ export default function ProjectView() {
             ? `Movie ready: ${out.absolutePath}`
             : `Already up to date — the movie is at ${out.absolutePath}`,
         );
-      } else if (opts?.upTo === "render") {
+      } else {
         setNotice(
           "The pipeline finished but no output file was reported. Check the render panel below.",
         );
+        return false;
       }
+      return true;
     } catch (e) {
       if ((e as { code?: string })?.code !== PIPELINE_CANCELLED) {
         setError(formatError(e));
       }
+      return false;
     } finally {
       pipelineAbortRef.current = false;
       setPipelineStep(null);
       setBusy(false);
     }
   };
+
+  // Exporting needs a finished mix — that is the last artefact "Run all"
+  // produces. A movie that was already rendered also qualifies, so a
+  // re-export (different path, or publishing) stays available.
+  const canExport =
+    media?.mix?.status === "ready" || media?.render?.status === "ready";
 
   /// Stop the chain after the current stage. We also cancel whatever
   /// job is in flight so the user isn't left waiting on a long FFmpeg
@@ -1904,9 +2257,24 @@ export default function ProjectView() {
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell has-status">
       <TopBar
         showBackToDashboard
+        saveStatus={
+          busy || pipelineStep
+            ? "busy"
+            : subtitleDoc?.dirty?.tts ||
+                subtitleDoc?.dirty?.sync ||
+                subtitleDoc?.dirty?.mix ||
+                subtitleDoc?.dirty?.render
+              ? "dirty"
+              : "saved"
+        }
+        saveLabel={
+          busy || pipelineStep
+            ? pipelineStep ?? "Working"
+            : undefined
+        }
         subject={
           <div className="topbar-project">
             <span className="pname">{project.name}</span>
@@ -1919,42 +2287,101 @@ export default function ProjectView() {
             </span>
           </div>
         }
+        center={
+          <TtsModelPicker
+            presets={ttsRecommendedVoices}
+            voices={ttsVoices}
+            env={ttsEnv}
+            engine={ttsEngine}
+            voiceId={ttsVoiceId}
+            downloading={!!activeTtsDownloadJob}
+            downloadProgress={
+              activeTtsDownloadJob
+                ? jobProgress[activeTtsDownloadJob.id] ?? 0
+                : 0
+            }
+            onSelect={(preset) => void handleSelectTtsModel(preset)}
+            onCancelDownload={() => void handleCancelTtsDownload()}
+          />
+        }
         actions={
           pipelineStep ? (
-            <button className="btn danger" onClick={handleCancelRunAll}>
-              Stop
-            </button>
+            <>
+              <span className="topbar-run-status" role="status">
+                <span className="spinner" aria-hidden="true" />
+                {pipelineStep}
+              </span>
+              <button className="btn danger" onClick={handleCancelRunAll}>
+                Stop
+              </button>
+            </>
           ) : (
-            <button
-              className="btn"
-              onClick={() => void handleExport()}
-              title="Choose an output location, then finish and render the movie"
-            >
-              <IconExport size={14} />
-              <span>Export</span>
-            </button>
+            <>
+              <button
+                className={canExport ? "btn" : "btn primary"}
+                onClick={() => void runPipeline()}
+                title="Transcribe, translate, dub, sync and mix — everything except the final export"
+              >
+                <IconSparkles size={14} />
+                <span>Run all</span>
+              </button>
+              <button
+                className="btn primary"
+                onClick={() => setExportOpen(true)}
+                disabled={!canExport}
+                title={
+                  canExport
+                    ? "Export the movie to a file or publish it"
+                    : "Run the pipeline first — the audio mix has to exist before exporting"
+                }
+              >
+                <IconExport size={14} />
+                <span>Export</span>
+              </button>
+            </>
           )
-        }
-        onExport={() => void runPipeline()}
-        exportLabel={pipelineStep ?? "Run all"}
-        exportBusy={!!pipelineStep}
-        exportTitle={
-          pipelineStep
-            ? `Pipeline running — ${pipelineStep}`
-            : "Run every remaining stage through to the final movie"
         }
       />
 
       <main className="app-body">
-        <EditorRail active={section} onChange={setSection} />
+        <div
+          className={`download-status-slot${
+            activeTtsDownloadJob ? "" : " is-empty"
+          }`}
+        >
+          {activeTtsDownloadJob && (
+            <StickyJobBanner
+              title={
+                describeTtsDownload(
+                  ttsEngine,
+                  jobProgress[activeTtsDownloadJob.id] ?? 0,
+                ).title
+              }
+              detail={
+                describeTtsDownload(
+                  ttsEngine,
+                  jobProgress[activeTtsDownloadJob.id] ?? 0,
+                ).detail
+              }
+              progress={jobProgress[activeTtsDownloadJob.id] ?? 0}
+              onCancel={() => void handleCancelTtsDownload()}
+            />
+          )}
+        </div>
+        <aside className="navcol">
+          <EditorRail
+            active={section}
+            onChange={setSection}
+            workflow={workflow}
+          />
 
-        <aside className="sidepane" aria-label="Section browser">
-          <div className="sidepane-header">
-            <span className="sidepane-title">
-              {SECTION_META[section].label}
-            </span>
-          </div>
-          <div className="sidepane-body">
+          <div className="nav-browser" aria-label="Section browser">
+            <div className="panel-head">
+              <span className="panel-head-title">
+                {SECTION_META[section].label}
+              </span>
+            </div>
+            <div className="nav-browser-body">
             <SectionBrowser
               section={section}
               project={project}
@@ -1964,14 +2391,39 @@ export default function ProjectView() {
               onImport={() => void handleImport(false)}
               onImportCopy={() => void handleImport(true)}
               onSelectSubtitle={handleSelectSubtitle}
+              onJumpToSection={setSection}
               workflow={workflow}
+              ttsModelLabel={ttsModelDisplayLabel(
+                ttsEngine,
+                ttsVoiceId,
+                ttsRecommendedVoices,
+                ttsVoices,
+              )}
+              ttsModelStatus={
+                ttsEngine === "f5-vietnamese"
+                  ? ttsEnv?.f5Model.installed
+                    ? "Installed"
+                    : "Not installed"
+                  : ttsVoices.some((v) => v.id === ttsVoiceId)
+                    ? "Installed"
+                    : "Not installed"
+              }
             />
+            </div>
           </div>
         </aside>
 
         <div className="workspace">
           <div className="workspace-center">
-            <div className="workspace-split">
+            <div
+              className={`workspace-split${
+                section === "media" || section === "render"
+                  ? " is-media-first"
+                  : section === "voices" || section === "mix"
+                    ? " is-form-first"
+                    : ""
+              }`}
+            >
               <Stage
                 sourcePath={project.sourceMediaPath ?? null}
                 onImport={() => void handleImport(false)}
@@ -1986,8 +2438,6 @@ export default function ProjectView() {
                     }
                     videoRef={videoRef}
                     onTimeUpdate={setVideoTime}
-                    // The render already carries its subtitles, burned in
-                    // or otherwise; drawing ours on top would double them.
                     overlayText={
                       showingResult
                         ? null
@@ -1997,6 +2447,23 @@ export default function ProjectView() {
                     }
                   />
                 ) : null}
+                <div className="stage-voice">
+                  <TtsModelPicker
+                    presets={ttsRecommendedVoices}
+                    voices={ttsVoices}
+                    env={ttsEnv}
+                    engine={ttsEngine}
+                    voiceId={ttsVoiceId}
+                    downloading={!!activeTtsDownloadJob}
+                    downloadProgress={
+                      activeTtsDownloadJob
+                        ? jobProgress[activeTtsDownloadJob.id] ?? 0
+                        : 0
+                    }
+                    onSelect={(preset) => void handleSelectTtsModel(preset)}
+                    onCancelDownload={() => void handleCancelTtsDownload()}
+                  />
+                </div>
                 {renderedPath && (
                   <div className="stage-target">
                     <button
@@ -2021,6 +2488,10 @@ export default function ProjectView() {
                   isPlaying={isPlaying}
                   disabled={!previewPath}
                   onToggle={togglePlayback}
+                  onSeek={seekVideo}
+                  onSkip={skipCue}
+                  onFullscreen={toggleFullscreen}
+                  videoRef={videoRef}
                 />
               </Stage>
 
@@ -2102,8 +2573,7 @@ export default function ProjectView() {
                   )}
 
                   {section === "transcription" && (
-                    <Panel title="Speech recognition">
-                      <TranscriptionPanel
+                    <TranscriptionPanel
                         hasAudio={!!media?.audioAbsolutePath}
                         sttEnv={sttEnv}
                         models={whisperModels}
@@ -2127,8 +2597,7 @@ export default function ProjectView() {
                         onCancel={handleCancelTranscribe}
                         onDownloadModel={handleDownloadModel}
                         onCancelDownload={handleCancelDownload}
-                      />
-                    </Panel>
+                    />
                   )}
 
                   {section === "translation" && (
@@ -2179,13 +2648,14 @@ export default function ProjectView() {
                   )}
 
                   {section === "subtitles" && (
-                    <Panel title="Subtitles">
-                      <SubtitlePanel
+                    <SubtitlePanel
                         summary={media?.subtitles ?? null}
                         doc={subtitleDoc}
                         loading={subtitleLoading}
                         hasTranscript={!!media?.transcript}
                         currentTime={videoTime}
+                        selectedId={selectedSubtitleId}
+                        onSelect={setSelectedSubtitleId}
                         onSeek={(t) => {
                           seekVideo(t);
                           const sid = findActiveSubtitleId(subtitleDoc, t);
@@ -2211,8 +2681,7 @@ export default function ProjectView() {
                         syncSettings={syncSettings}
                         onSyncPreview={handleSyncPreview}
                         onSyncRegenerate={handleSyncRegenerate}
-                      />
-                    </Panel>
+                    />
                   )}
 
                   {section === "voices" && (
@@ -2227,12 +2696,10 @@ export default function ProjectView() {
                           summary={media?.tts ?? null}
                           subtitleDoc={subtitleDoc}
                           engine={ttsEngine}
-                          qualityMode={ttsQualityMode}
                           voiceId={ttsVoiceId}
                           settings={ttsSettings}
-                          onEngineChange={setTtsEngine}
-                          onQualityModeChange={setTtsQualityMode}
                           onVoiceChange={setTtsVoiceId}
+                          onSelectModel={handleSelectTtsModel}
                           onSettingsChange={setTtsSettings}
                           activeJob={activeTtsJob}
                           progress={
@@ -2301,8 +2768,7 @@ export default function ProjectView() {
                   )}
 
                   {section === "mix" && (
-                    <Panel title="Audio mix">
-                      <MixPanel
+                    <MixPanel
                         env={mixEnv}
                         summary={media?.mix ?? null}
                         syncSummary={media?.sync ?? null}
@@ -2319,8 +2785,7 @@ export default function ProjectView() {
                         onCancel={handleMixCancel}
                         onPlay={handleMixPlay}
                         lastPreview={lastMixPreview}
-                      />
-                    </Panel>
+                    />
                   )}
 
                   {section === "render" && (
@@ -2383,15 +2848,68 @@ export default function ProjectView() {
             workflow={workflow}
             subtitleDoc={subtitleDoc}
             selectedSubtitleId={effectiveSubtitleId}
+            section={section}
+            onClearSelection={() => setSelectedSubtitleId(null)}
             currentTime={videoTime}
             processing={activeProcessing}
             jobProgress={jobProgress}
             onCancelJob={(jobId) => void cancelJob(jobId)}
             onJumpToSection={setSection}
             pipelineStep={pipelineStep}
+            ttsPresets={ttsRecommendedVoices}
+            ttsVoices={ttsVoices}
+            ttsEnv={ttsEnv}
+            ttsEngine={ttsEngine}
+            ttsVoiceId={ttsVoiceId}
+            ttsDownloading={!!activeTtsDownloadJob}
+            ttsBusy={busy}
+            onSelectTtsModel={handleSelectTtsModel}
+            onPatchSubtitle={handleSubtitlePatch}
+            onTtsPreview={handleTtsPreview}
+            onTtsRegenerate={handleTtsRegenerate}
+            onSyncPreview={handleSyncPreview}
+            onSyncRegenerate={handleSyncRegenerate}
+            onSplitSubtitle={handleSubtitleSplit}
+            onMergeSubtitle={handleSubtitleMerge}
+            onDeleteSubtitle={handleSubtitleDelete}
           />
         </aside>
       </main>
+      <StatusBar
+        ready={!busy && !pipelineStep && activeProcessing.length === 0}
+        job={activeProcessing[0] ?? null}
+        progress={
+          activeProcessing[0]
+            ? jobProgress[activeProcessing[0].job.id] ?? 0
+            : 0
+        }
+        time={videoTime}
+        duration={media?.metadata?.durationSecs ?? null}
+      />
+
+      {exportOpen && (
+        <ExportModal
+          renderedPath={
+            media?.render?.status === "ready"
+              ? (media.render.absolutePath ?? null)
+              : null
+          }
+          outputPath={
+            renderSettings.outputPath ??
+            media?.render?.defaultOutputAbsolute ??
+            null
+          }
+          onClose={() => setExportOpen(false)}
+          onLocal={() => {
+            setExportOpen(false);
+            void handleExportLocal();
+          }}
+          onSocial={() => {
+            setExportOpen(false);
+            void handleExportSocial();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -2429,45 +2947,68 @@ const SECTION_META: Record<
   render:       { label: "Render",        workspaceLabel: "Final Render",        icon: <IconExport size={18} />,    hint: "Export the finished movie" },
 };
 
+/**
+ * The workflow step that decides the small state dot next to each nav row,
+ * so the navigator doubles as a progress read-out of the pipeline.
+ */
+const SECTION_STEP: Record<EditorSection, string> = {
+  media: "extract",
+  transcription: "transcribe",
+  translation: "translate",
+  subtitles: "transcribe",
+  voices: "tts",
+  mix: "mix",
+  render: "render",
+};
+
 function EditorRail(props: {
   active: EditorSection;
   onChange: (s: EditorSection) => void;
+  workflow: WorkflowState;
 }) {
-  const order: EditorSection[] = [
-    "media",
-    "transcription",
-    "translation",
-    "subtitles",
-    "voices",
-    "mix",
-    "render",
-  ];
-  return (
-    <nav className="rail" aria-label="Editor sections">
-      {order.map((s) => (
-        <button
-          key={s}
-          className={`rail-item ${props.active === s ? "active" : ""}`}
-          onClick={() => props.onChange(s)}
-          title={SECTION_META[s].hint}
-        >
-          <span className="rail-icon">{SECTION_META[s].icon}</span>
-          <span>{SECTION_META[s].label}</span>
-        </button>
-      ))}
-      <div className="rail-spacer" />
-      <div className="rail-divider" />
-      <Link
-        to="/settings"
-        className="rail-item"
-        title="Settings"
-        style={{ textDecoration: "none" }}
+  const stateOf = (s: EditorSection) =>
+    props.workflow.steps.find((step) => step.key === SECTION_STEP[s])?.state ??
+    "waiting";
+
+  const item = (s: EditorSection) => {
+    const state = stateOf(s);
+    return (
+      <button
+        key={s}
+        className={`nav-item${props.active === s ? " active" : ""}`}
+        onClick={() => props.onChange(s)}
+        title={SECTION_META[s].hint}
       >
-        <span className="rail-icon">
-          <IconSettings size={18} />
-        </span>
-        <span>Settings</span>
-      </Link>
+        <span className="nav-icon">{SECTION_META[s].icon}</span>
+        <span className="nav-label">{SECTION_META[s].label}</span>
+        <span
+          className={`nav-state${state === "waiting" ? "" : ` nav-state--${state}`}`}
+        />
+      </button>
+    );
+  };
+
+  return (
+    <nav className="nav" aria-label="Editor sections">
+      <div className="nav-group">
+        <div className="nav-group-title">Workspace</div>
+        {(["media", "subtitles", "voices", "mix"] as EditorSection[]).map(item)}
+      </div>
+      <div className="nav-group">
+        <div className="nav-group-title">AI</div>
+        {(["transcription", "translation"] as EditorSection[]).map(item)}
+      </div>
+      <div className="nav-group">
+        <div className="nav-group-title">Project</div>
+        {(["render"] as EditorSection[]).map(item)}
+        <Link to="/settings" className="nav-item" title="Models and settings">
+          <span className="nav-icon">
+            <IconSettings size={18} />
+          </span>
+          <span className="nav-label">Models &amp; settings</span>
+          <span className="nav-state" />
+        </Link>
+      </div>
     </nav>
   );
 }
@@ -2488,7 +3029,10 @@ type SectionBrowserProps = {
   onImport: () => void;
   onImportCopy: () => void;
   onSelectSubtitle: (id: number) => void;
+  onJumpToSection: (s: EditorSection) => void;
   workflow: WorkflowState;
+  ttsModelLabel: string;
+  ttsModelStatus: string;
 };
 
 function SectionBrowser(p: SectionBrowserProps) {
@@ -2569,6 +3113,23 @@ function SectionBrowser(p: SectionBrowserProps) {
         ) : (
           <div className="asset-empty">No subtitle document yet.</div>
         )}
+
+        <div className="sidepane-group-title">Voice model</div>
+        <button
+          className="asset"
+          type="button"
+          onClick={() => p.onJumpToSection("voices")}
+          title="Choose TTS model"
+          style={{ textAlign: "left", cursor: "pointer", width: "100%" }}
+        >
+          <div className="asset-icon">
+            <IconMic size={16} />
+          </div>
+          <div className="asset-main">
+            <div className="asset-name">{p.ttsModelLabel}</div>
+            <div className="asset-meta">{p.ttsModelStatus} · click to change</div>
+          </div>
+        </button>
       </>
     );
   }
@@ -2636,12 +3197,17 @@ function SectionBrowser(p: SectionBrowserProps) {
     <>
       <div className="sidepane-group-title">Workflow</div>
       {p.workflow.steps.map((step) => (
-        <div key={step.key} className={`workflow-step ${step.state}`}>
+        <button
+          key={step.key}
+          type="button"
+          className={`workflow-step ${step.state}`}
+          onClick={() => p.onJumpToSection(WORKFLOW_SECTION[step.key] ?? "media")}
+        >
           <span className="wf-marker" aria-hidden="true">
             {step.state === "done" ? "✓" : step.state === "error" ? "!" : ""}
           </span>
           <span>{step.label}</span>
-        </div>
+        </button>
       ))}
     </>
   );
@@ -2664,8 +3230,11 @@ function Stage(props: {
           props.children
         ) : (
           <div className="stage-empty">
+            <div className="empty-title" style={{ color: "var(--fg-canvas)" }}>
+              No project media
+            </div>
             <div style={{ marginBottom: 12 }}>
-              No video imported yet — drop a movie in to get started.
+              Import a movie to start transcription, translation, and dubbing.
             </div>
             <button
               className="btn primary"
@@ -2688,10 +3257,25 @@ function StageToolbar(props: {
   isPlaying: boolean;
   disabled: boolean;
   onToggle: () => void;
+  onSeek: (t: number) => void;
+  onSkip: (dir: -1 | 1) => void;
+  onFullscreen: () => void;
+  videoRef: React.MutableRefObject<HTMLVideoElement | null>;
 }) {
+  const [volume, setVolume] = useState(1);
+  const duration = props.duration ?? 0;
   return (
     <div className="stage-toolbar">
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div className="stage-toolbar-left">
+        <button
+          className="icon-btn"
+          onClick={() => props.onSkip(-1)}
+          disabled={props.disabled}
+          title="Previous cue"
+          aria-label="Previous cue"
+        >
+          <IconSkipBack size={15} />
+        </button>
         <button
           className="icon-btn"
           onClick={props.onToggle}
@@ -2701,13 +3285,60 @@ function StageToolbar(props: {
         >
           {props.isPlaying ? <IconPause size={16} /> : <IconPlay size={16} />}
         </button>
+        <button
+          className="icon-btn"
+          onClick={() => props.onSkip(1)}
+          disabled={props.disabled}
+          title="Next cue"
+          aria-label="Next cue"
+        >
+          <IconSkipForward size={15} />
+        </button>
         <span className="tc">
           {formatTimecode(props.time)}
           <span className="tc-sep"> / </span>
           {props.duration != null ? formatTimecode(props.duration) : "--:--"}
         </span>
       </div>
-      <div className="subtle xsmall">Preview</div>
+      <input
+        className="stage-scrubber"
+        type="range"
+        min={0}
+        max={Math.max(0.01, duration)}
+        step={0.01}
+        value={Math.min(props.time, duration)}
+        disabled={props.disabled || !duration}
+        onChange={(e) => props.onSeek(Number(e.target.value))}
+        aria-label="Playback position"
+      />
+      <div className="stage-toolbar-right">
+        <IconVolume size={14} />
+        <input
+          className="stage-volume"
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={volume}
+          disabled={props.disabled}
+          onChange={(e) => {
+            const next = Number(e.target.value);
+            setVolume(next);
+            const el = props.videoRef.current;
+            if (el) el.volume = next;
+          }}
+          aria-label="Volume"
+        />
+        <button
+          className="icon-btn"
+          onClick={props.onFullscreen}
+          disabled={props.disabled}
+          title="Fullscreen"
+          aria-label="Fullscreen"
+        >
+          <IconMaximize size={14} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -2877,12 +3508,20 @@ function Timeline(props: {
   return (
     <div className="timeline on-canvas" aria-label="Timeline">
       <div className="timeline-header">
-        <div>
-          {duration
-            ? `${formatTimecode(props.currentTime)} · ${formatTimecode(duration)}`
-            : "No media loaded"}
+        <div className="timeline-title">
+          <span className="timeline-label">Timeline</span>
+          {duration ? (
+            <span className="timeline-tc">
+              {formatTimecode(props.currentTime)}
+              <span className="tc-sep"> / </span>
+              {formatTimecode(duration)}
+            </span>
+          ) : (
+            <span className="timeline-tc muted-canvas">No media loaded</span>
+          )}
         </div>
         <div className="zoom-controls">
+          <span className="zoom-readout">{Math.round(pxPerSec)} px/s</span>
           <button
             onClick={() => setPxPerSec((z) => Math.max(4, z / 1.4))}
             title="Zoom out"
@@ -2902,16 +3541,26 @@ function Timeline(props: {
       <div className="timeline-body">
         <div className="tracks-labels">
           <div className="track-label">
-            <span className="tag-name">V1</span> Video
+            <span className="track-swatch video" />
+            <span className="track-name">V1 Video</span>
           </div>
           <div className="track-label">
-            <span className="tag-name">A1</span> Audio
+            <span className="track-swatch audio" />
+            <span className="track-name">A1 Audio</span>
           </div>
           <div className="track-label">
-            <span className="tag-name">A2</span> Voice
+            <span className="track-swatch voice" />
+            <span className="track-name">A2 Voice</span>
+            {props.hasVoice ? (
+              <span className="track-count">{segments.length}</span>
+            ) : null}
           </div>
           <div className="track-label">
-            <span className="tag-name">S1</span> Subtitle
+            <span className="track-swatch subtitle" />
+            <span className="track-name">S1 Subs</span>
+            {segments.length ? (
+              <span className="track-count">{segments.length}</span>
+            ) : null}
           </div>
         </div>
         <div
@@ -3042,9 +3691,173 @@ function computeWorkflow(input: {
       mk("tts",        "Generate voice",    input.ttsRatio >= .999,    input.active.tts),
       mk("sync",       "Sync voice",        input.syncRatio >= .999,   input.active.sync),
       mk("mix",        "Mix audio",         input.mixReady,            input.active.mix),
-      mk("render",     "Render movie",      input.renderReady,         input.active.render),
+      mk("render",     "Export movie",      input.renderReady,         input.active.render),
     ],
   };
+}
+
+/**
+ * Contextual inspector for the selected subtitle line. This is where the
+ * per-line controls live now that the editor table itself stays compact.
+ */
+function SubtitleInspector(props: {
+  seg: SubtitleSegment;
+  voices: VoiceInfo[];
+  currentTime: number;
+  onPatch: (id: number, patch: SubtitleSegmentPatch) => void;
+  onTtsPreview: (segmentId: number) => void;
+  onTtsRegenerate: (segmentId: number) => void;
+  onSyncPreview: (segmentId: number) => void;
+  onSyncRegenerate: (segmentId: number) => void;
+  onSplit: (id: number, time: number) => void;
+  onMerge: (id: number) => void;
+  onDelete: (id: number) => void;
+}) {
+  const { seg } = props;
+  const [dubbing, setDubbing] = useState(seg.dubbingText ?? "");
+  const [translated, setTranslated] = useState(seg.translatedText);
+  useEffect(() => setDubbing(seg.dubbingText ?? ""), [seg.dubbingText, seg.id]);
+  useEffect(
+    () => setTranslated(seg.translatedText),
+    [seg.translatedText, seg.id],
+  );
+
+  const canSplit =
+    props.currentTime > seg.start + 0.05 && props.currentTime < seg.end - 0.05;
+
+  return (
+    <>
+      <div className="section">
+        <div className="section-title">Timing</div>
+        <div className="prop-grid">
+          <span>Start</span>
+          <b className="mono">{formatTimecode(seg.start)}</b>
+          <span>End</span>
+          <b className="mono">{formatTimecode(seg.end)}</b>
+          <span>Duration</span>
+          <b className="mono">{(seg.end - seg.start).toFixed(2)}s</b>
+          <span>Speaker</span>
+          <b>{seg.speaker || "—"}</b>
+        </div>
+        <div className="actions">
+          <button
+            className="btn small"
+            disabled={!canSplit}
+            onClick={() => props.onSplit(seg.id, props.currentTime)}
+            title="Split this line at the playhead"
+          >
+            Split at playhead
+          </button>
+          <button
+            className="btn small"
+            onClick={() => props.onMerge(seg.id)}
+            title="Merge with the next line"
+          >
+            Merge next
+          </button>
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Text</div>
+        <label className="field">
+          <span>Original</span>
+          <div className="readout">{seg.sourceText || "—"}</div>
+        </label>
+        <label className="field">
+          <span>Translation</span>
+          <textarea
+            rows={3}
+            value={translated}
+            onChange={(e) => setTranslated(e.target.value)}
+            onBlur={() => {
+              if (translated !== seg.translatedText)
+                props.onPatch(seg.id, { translatedText: translated });
+            }}
+          />
+        </label>
+        <label className="field">
+          <span>Dubbing line</span>
+          <textarea
+            rows={3}
+            placeholder="Spoken line (defaults to the translation)"
+            value={dubbing}
+            onChange={(e) => setDubbing(e.target.value)}
+            onBlur={() => {
+              if (dubbing !== (seg.dubbingText ?? ""))
+                props.onPatch(seg.id, { dubbingText: dubbing });
+            }}
+          />
+        </label>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Voice</div>
+        <label className="field">
+          <span>Voice</span>
+          {props.voices.length > 0 ? (
+            <select
+              value={seg.voiceId ?? ""}
+              onChange={(e) =>
+                props.onPatch(seg.id, {
+                  voiceId: e.target.value === "" ? null : e.target.value,
+                })
+              }
+            >
+              <option value="">Project default</option>
+              {props.voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}
+                  {v.gender && v.gender !== "unknown" ? ` · ${v.gender}` : ""}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="readout">No voices installed yet.</div>
+          )}
+        </label>
+        <div className="actions">
+          <button
+            className="btn primary small"
+            onClick={() => props.onTtsRegenerate(seg.id)}
+          >
+            Generate voice
+          </button>
+          <button
+            className="btn small"
+            onClick={() => props.onTtsPreview(seg.id)}
+          >
+            Preview
+          </button>
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Sync</div>
+        <div className="actions">
+          <button
+            className="btn small"
+            onClick={() => props.onSyncRegenerate(seg.id)}
+          >
+            Resync line
+          </button>
+          <button
+            className="btn small"
+            onClick={() => props.onSyncPreview(seg.id)}
+          >
+            Preview synced
+          </button>
+        </div>
+        <button
+          className="btn danger small"
+          style={{ alignSelf: "flex-start" }}
+          onClick={() => props.onDelete(seg.id)}
+        >
+          Delete line
+        </button>
+      </div>
+    </>
+  );
 }
 
 function Inspector(props: {
@@ -3053,12 +3866,30 @@ function Inspector(props: {
   workflow: WorkflowState;
   subtitleDoc: SubtitleDoc | null;
   selectedSubtitleId: number | null;
+  section: EditorSection;
+  onClearSelection: () => void;
   currentTime: number;
   processing: { label: string; job: JobSnapshot }[];
   jobProgress: Record<string, number>;
   onCancelJob: (jobId: string) => void;
   onJumpToSection: (s: EditorSection) => void;
   pipelineStep: string | null;
+  ttsPresets: TtsRecommendedVoicePreset[];
+  ttsVoices: VoiceInfo[];
+  ttsEnv: TtsEnv | null;
+  ttsEngine: string;
+  ttsVoiceId: string;
+  ttsDownloading: boolean;
+  ttsBusy: boolean;
+  onSelectTtsModel: (preset: TtsRecommendedVoicePreset) => Promise<void>;
+  onPatchSubtitle: (id: number, patch: SubtitleSegmentPatch) => void;
+  onTtsPreview: (segmentId: number) => void;
+  onTtsRegenerate: (segmentId: number) => void;
+  onSyncPreview: (segmentId: number) => void;
+  onSyncRegenerate: (segmentId: number) => void;
+  onSplitSubtitle: (id: number, time: number) => void;
+  onMergeSubtitle: (id: number) => void;
+  onDeleteSubtitle: (id: number) => void;
 }) {
   const seg = useMemo(
     () =>
@@ -3072,58 +3903,39 @@ function Inspector(props: {
 
   return (
     <>
-      <div className="inspector-header">
-        <span className="inspector-title">Inspector</span>
+      <div className="panel-head">
+        <span className="panel-head-title">
+          {seg
+            ? `Subtitle · ${String(seg.id).padStart(3, "0")}`
+            : SECTION_META[props.section].workspaceLabel}
+        </span>
+        {seg ? (
+          <div className="panel-head-tools">
+            <button
+              className="btn icon"
+              title="Clear selection"
+              onClick={() => props.onClearSelection()}
+            >
+              <IconClose size={14} />
+            </button>
+          </div>
+        ) : null}
       </div>
       <div className="inspector-body">
         {seg ? (
-          <div className="section">
-            <div className="section-title">Selected subtitle</div>
-            <div className="kv-row">
-              <span>ID</span>
-              <span className="mono">
-                {String(seg.id).padStart(3, "0")}
-              </span>
-            </div>
-            <div className="kv-row">
-              <span>Start</span>
-              <span className="mono">{formatTimecode(seg.start)}</span>
-            </div>
-            <div className="kv-row">
-              <span>End</span>
-              <span className="mono">{formatTimecode(seg.end)}</span>
-            </div>
-            <div className="kv-row">
-              <span>Duration</span>
-              <span className="mono">
-                {(seg.end - seg.start).toFixed(2)}s
-              </span>
-            </div>
-            <div className="field" style={{ marginTop: 8 }}>
-              <span>Original</span>
-              <div className="translation-row-source">
-                {seg.sourceText || "—"}
-              </div>
-            </div>
-            <div className="field">
-              <span>Translation</span>
-              <div className="translation-row-source">
-                {seg.translatedText || "—"}
-              </div>
-            </div>
-            <div className="field">
-              <span>Dubbing</span>
-              <div className="translation-row-source">
-                {seg.dubbingText || seg.translatedText || "—"}
-              </div>
-            </div>
-            <button
-              className="btn small"
-              onClick={() => props.onJumpToSection("subtitles")}
-            >
-              Open in editor
-            </button>
-          </div>
+          <SubtitleInspector
+            seg={seg}
+            voices={props.ttsVoices.filter((v) => v.engine === props.ttsEngine)}
+            currentTime={props.currentTime}
+            onPatch={props.onPatchSubtitle}
+            onTtsPreview={props.onTtsPreview}
+            onTtsRegenerate={props.onTtsRegenerate}
+            onSyncPreview={props.onSyncPreview}
+            onSyncRegenerate={props.onSyncRegenerate}
+            onSplit={props.onSplitSubtitle}
+            onMerge={props.onMergeSubtitle}
+            onDelete={props.onDeleteSubtitle}
+          />
         ) : (
           <div className="section">
             <div className="section-title">Project</div>
@@ -3181,6 +3993,80 @@ function Inspector(props: {
         )}
 
         <div className="section">
+          <div className="section-title">Voice model</div>
+          <label className="field">
+            <span>TTS / dubbing</span>
+            <select
+              value={
+                props.ttsPresets.find((preset) =>
+                  ttsPresetSelected(preset, props.ttsEngine, props.ttsVoiceId),
+                )?.preset ?? ""
+              }
+              disabled={props.ttsBusy || props.ttsDownloading}
+              onChange={(event) => {
+                const preset = props.ttsPresets.find(
+                  (item) => item.preset === event.target.value,
+                );
+                if (preset) void props.onSelectTtsModel(preset);
+              }}
+            >
+              {!props.ttsPresets.some((preset) =>
+                ttsPresetSelected(preset, props.ttsEngine, props.ttsVoiceId),
+              ) && (
+                <option value="">
+                  {ttsModelDisplayLabel(
+                    props.ttsEngine,
+                    props.ttsVoiceId,
+                    props.ttsPresets,
+                    props.ttsVoices,
+                  )}
+                </option>
+              )}
+              {props.ttsPresets.map((preset) => {
+                const installed = ttsPresetInstalled(
+                  preset,
+                  props.ttsVoices,
+                  props.ttsEnv,
+                );
+                return (
+                  <option key={preset.preset} value={preset.preset}>
+                    {preset.label}
+                    {installed ? "" : " — not installed, will download"}
+                  </option>
+                );
+              })}
+            </select>
+          </label>
+          {props.ttsDownloading && (
+            <div className="tts-model-picker-progress" style={{ marginTop: 8 }}>
+              <div className="tts-model-picker-progress-row">
+                <span>Downloading model…</span>
+                <button
+                  className="btn tiny danger"
+                  type="button"
+                  onClick={() => {
+                    const job = props.processing.find(
+                      (item) => item.job.stage === "tts" && !item.job.projectId,
+                    );
+                    if (job) props.onCancelJob(job.job.id);
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          <button
+            className="btn small"
+            style={{ marginTop: 8 }}
+            type="button"
+            onClick={() => props.onJumpToSection("voices")}
+          >
+            Open voice settings
+          </button>
+        </div>
+
+        <div className="section">
           <div className="section-title">AI workflow</div>
           {props.pipelineStep && (
             <div className="banner banner--info" style={{ marginBottom: 8 }}>
@@ -3190,12 +4076,19 @@ function Inspector(props: {
             </div>
           )}
           {props.workflow.steps.map((step) => (
-            <div key={step.key} className={`workflow-step ${step.state}`}>
+            <button
+              key={step.key}
+              type="button"
+              className={`workflow-step ${step.state}`}
+              onClick={() =>
+                props.onJumpToSection(WORKFLOW_SECTION[step.key] ?? "media")
+              }
+            >
               <span className="wf-marker" aria-hidden="true">
                 {step.state === "done" ? "✓" : step.state === "error" ? "!" : ""}
               </span>
               <span>{step.label}</span>
-            </div>
+            </button>
           ))}
         </div>
 
@@ -4369,9 +5262,9 @@ function TranslationRow(props: {
 
 // ---------------- Subtitle panel ----------------
 
-const SUBTITLE_ROW_HEIGHT = 232; // rough px height per row for virtualization
+const SUBTITLE_ROW_HEIGHT = 52; // compact editor row (2 text lines)
 const SUBTITLE_LIST_HEIGHT = 520;
-const SUBTITLE_OVERSCAN = 4;
+const SUBTITLE_OVERSCAN = 6;
 
 function SubtitlePanel(props: {
   summary: SubtitleSummary | null;
@@ -4380,6 +5273,8 @@ function SubtitlePanel(props: {
   hasTranscript: boolean;
   hasVideo: boolean;
   currentTime: number;
+  selectedId: number | null;
+  onSelect: (id: number) => void;
   onSeek: (time: number) => void;
   onRebuild: () => void;
   onPatch: (id: number, patch: SubtitleSegmentPatch) => void;
@@ -4406,15 +5301,13 @@ function SubtitlePanel(props: {
     doc,
     loading,
     hasTranscript,
-    hasVideo,
     currentTime,
+    selectedId,
+    onSelect,
     onSeek,
     onRebuild,
     onPatch,
     onAdd,
-    onDelete,
-    onSplit,
-    onMerge,
     onImport,
     onExport,
     voices,
@@ -4422,12 +5315,8 @@ function SubtitlePanel(props: {
     ttsEngine,
     ttsVoiceId,
     ttsSettings,
-    onTtsPreview,
-    onTtsRegenerate,
     syncManifest,
     syncSettings,
-    onSyncPreview,
-    onSyncRegenerate,
   } = props;
 
   const [exportFormat, setExportFormat] = useState<SubtitleFormat>("srt");
@@ -4452,27 +5341,36 @@ function SubtitlePanel(props: {
     if (!hasTranscript) {
       return (
         <div className="empty-state small">
-          Run speech recognition to produce a transcript, then click
-          <em> Build subtitles</em> to derive the canonical subtitle model.
+          <div className="icon-64" aria-hidden="true">
+            <IconSubtitles size={20} />
+          </div>
+          <div className="empty-title">No subtitles yet</div>
+          <div className="empty-hint">
+            Transcribe the video first, then build a subtitle document from the
+            transcript.
+          </div>
         </div>
       );
     }
     return (
-      <div className="subtitles-empty">
-        <p className="small">
-          No subtitle document yet. Build it from the current transcript
-          (and translation, if available), or import an existing SRT/ASS
-          file.
-        </p>
-        <div className="actions">
-          <button className="btn primary" onClick={onRebuild}>
-            Build subtitles
-          </button>
-          <button className="btn" onClick={onImport}>
-            Import SRT/ASS
-          </button>
+        <div className="empty-state small">
+          <div className="icon-64" aria-hidden="true">
+            <IconSubtitles size={20} />
+          </div>
+          <div className="empty-title">No subtitle document</div>
+          <div className="empty-hint">
+            Build it from the current transcript, or import an existing SRT/ASS
+            file.
+          </div>
+          <div className="actions">
+            <button className="btn primary" onClick={onRebuild}>
+              Build subtitles
+            </button>
+            <button className="btn" onClick={onImport}>
+              Import SRT/ASS
+            </button>
+          </div>
         </div>
-      </div>
     );
   }
 
@@ -4580,24 +5478,17 @@ function SubtitlePanel(props: {
       <SubtitleList
         segments={filtered}
         activeId={activeId}
-        currentTime={currentTime}
-        hasVideo={hasVideo}
+        selectedId={selectedId}
+        onSelect={onSelect}
         onSeek={onSeek}
         onPatch={onPatch}
-        onDelete={onDelete}
-        onSplit={onSplit}
-        onMerge={onMerge}
         voices={voices}
         ttsManifest={ttsManifest}
         ttsEngine={ttsEngine}
         ttsVoiceId={ttsVoiceId}
         ttsSettings={ttsSettings}
-        onTtsPreview={onTtsPreview}
-        onTtsRegenerate={onTtsRegenerate}
         syncManifest={syncManifest}
         syncSettings={syncSettings}
-        onSyncPreview={onSyncPreview}
-        onSyncRegenerate={onSyncRegenerate}
       />
     </div>
   );
@@ -4606,49 +5497,51 @@ function SubtitlePanel(props: {
 function SubtitleList(props: {
   segments: SubtitleSegment[];
   activeId: number | null;
-  currentTime: number;
-  hasVideo: boolean;
+  selectedId: number | null;
+  onSelect: (id: number) => void;
   onSeek: (time: number) => void;
   onPatch: (id: number, patch: SubtitleSegmentPatch) => void;
-  onDelete: (id: number) => void;
-  onSplit: (id: number, time: number) => void;
-  onMerge: (id: number) => void;
   voices: VoiceInfo[];
   ttsManifest: TtsManifest | null;
   ttsEngine: string;
   ttsVoiceId: string;
   ttsSettings: TtsSettings;
-  onTtsPreview: (segmentId: number) => void;
-  onTtsRegenerate: (segmentId: number) => void;
   syncManifest: SyncManifest | null;
   syncSettings: SyncSettings;
-  onSyncPreview: (segmentId: number) => void;
-  onSyncRegenerate: (segmentId: number) => void;
 }) {
   const {
     segments,
     activeId,
-    currentTime,
-    hasVideo,
+    selectedId,
+    onSelect,
     onSeek,
     onPatch,
-    onDelete,
-    onSplit,
-    onMerge,
     voices,
     ttsManifest,
     ttsEngine,
     ttsVoiceId,
     ttsSettings,
-    onTtsPreview,
-    onTtsRegenerate,
     syncManifest,
     syncSettings,
-    onSyncPreview,
-    onSyncRegenerate,
   } = props;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  // The table fills the editor pane, so the virtualisation window has to
+  // follow the real viewport height instead of a hard-coded value.
+  const [viewportHeight, setViewportHeight] = useState(SUBTITLE_LIST_HEIGHT);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const measure = () =>
+      setViewportHeight((current) => {
+        const next = Math.max(120, element.clientHeight);
+        return Math.abs(current - next) < 1 ? current : next;
+      });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const ttsBySegment = useMemo(
     () =>
       new Map(
@@ -4680,8 +5573,7 @@ function SubtitleList(props: {
     Math.floor(scrollTop / SUBTITLE_ROW_HEIGHT) - SUBTITLE_OVERSCAN,
   );
   const visibleCount =
-    Math.ceil(SUBTITLE_LIST_HEIGHT / SUBTITLE_ROW_HEIGHT) +
-    SUBTITLE_OVERSCAN * 2;
+    Math.ceil(viewportHeight / SUBTITLE_ROW_HEIGHT) + SUBTITLE_OVERSCAN * 2;
   const endIndex = Math.min(segments.length, startIndex + visibleCount);
   const visible = segments.slice(startIndex, endIndex);
 
@@ -4690,65 +5582,62 @@ function SubtitleList(props: {
   }
 
   return (
-    <div
-      ref={scrollRef}
-      className="subtitle-list"
-      style={{ height: SUBTITLE_LIST_HEIGHT }}
-      onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
-    >
-      <div style={{ height: totalHeight, position: "relative" }}>
-        {visible.map((seg, i) => {
-          const idx = startIndex + i;
-          const top = idx * SUBTITLE_ROW_HEIGHT;
-          return (
-            <div
-              key={seg.id}
-              className="subtitle-row-wrap"
-              style={{
-                position: "absolute",
-                top,
-                left: 0,
-                right: 0,
-                height: SUBTITLE_ROW_HEIGHT,
-              }}
-            >
-              <SubtitleRow
-                seg={seg}
-                active={seg.id === activeId}
-                canSplitAt={
-                  hasVideo &&
-                  currentTime > seg.start + 0.05 &&
-                  currentTime < seg.end - 0.05
-                }
-                currentTime={currentTime}
-                hasVideo={hasVideo}
-                onSeek={onSeek}
-                onPatch={onPatch}
-                onDelete={onDelete}
-                onSplit={onSplit}
-                onMerge={onMerge}
-                voices={engineVoices}
-                ttsStatus={computeTtsStatus(
-                  seg,
-                  ttsBySegment.get(seg.id) ?? null,
-                  ttsEngine,
-                  ttsVoiceId,
-                  ttsSettings,
-                )}
-                onTtsPreview={onTtsPreview}
-                onTtsRegenerate={onTtsRegenerate}
-                syncStatus={computeSyncStatus(
-                  seg,
-                  syncBySegment.get(seg.id) ?? null,
-                  syncManifest,
-                  syncSettings,
-                )}
-                onSyncPreview={onSyncPreview}
-                onSyncRegenerate={onSyncRegenerate}
-              />
-            </div>
-          );
-        })}
+    <div className="sub-table">
+      <div className="sub-head" role="row">
+        <span>Time</span>
+        <span>Speaker</span>
+        <span>Original</span>
+        <span>Translation</span>
+        <span>Voice</span>
+        <span className="sub-head-status">St</span>
+      </div>
+      <div
+        ref={scrollRef}
+        className="subtitle-list"
+        onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+      >
+        <div style={{ height: totalHeight, position: "relative" }}>
+          {visible.map((seg, i) => {
+            const idx = startIndex + i;
+            const top = idx * SUBTITLE_ROW_HEIGHT;
+            return (
+              <div
+                key={seg.id}
+                className="subtitle-row-wrap"
+                style={{
+                  position: "absolute",
+                  top,
+                  left: 0,
+                  right: 0,
+                  height: SUBTITLE_ROW_HEIGHT,
+                }}
+              >
+                <SubtitleRow
+                  seg={seg}
+                  active={seg.id === activeId}
+                  selected={seg.id === selectedId}
+                  onSelect={onSelect}
+                  onSeek={onSeek}
+                  onPatch={onPatch}
+                  voices={engineVoices}
+                  ttsStatus={computeTtsStatus(
+                    seg,
+                    ttsBySegment.get(seg.id) ?? null,
+                    ttsEngine,
+                    ttsVoiceId,
+                    ttsSettings,
+                  )}
+                  syncStatus={computeSyncStatus(
+                    seg,
+                    syncBySegment.get(seg.id) ?? null,
+                    syncManifest,
+                    syncSettings,
+                  )}
+                />
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -4757,51 +5646,33 @@ function SubtitleList(props: {
 function SubtitleRow(props: {
   seg: SubtitleSegment;
   active: boolean;
-  canSplitAt: boolean;
-  currentTime: number;
-  hasVideo: boolean;
+  selected: boolean;
+  onSelect: (id: number) => void;
   onSeek: (time: number) => void;
   onPatch: (id: number, patch: SubtitleSegmentPatch) => void;
-  onDelete: (id: number) => void;
-  onSplit: (id: number, time: number) => void;
-  onMerge: (id: number) => void;
   voices: VoiceInfo[];
   ttsStatus: TtsRowStatus;
-  onTtsPreview: (segmentId: number) => void;
-  onTtsRegenerate: (segmentId: number) => void;
   syncStatus: SyncRowStatus;
-  onSyncPreview: (segmentId: number) => void;
-  onSyncRegenerate: (segmentId: number) => void;
 }) {
   const {
     seg,
     active,
-    canSplitAt,
-    currentTime,
-    hasVideo,
+    selected,
+    onSelect,
     onSeek,
     onPatch,
-    onDelete,
-    onSplit,
-    onMerge,
     voices,
     ttsStatus,
-    onTtsPreview,
-    onTtsRegenerate,
     syncStatus,
-    onSyncPreview,
-    onSyncRegenerate,
   } = props;
   const [source, setSource] = useState(seg.sourceText);
   const [translated, setTranslated] = useState(seg.translatedText);
-  const [dubbing, setDubbing] = useState(seg.dubbingText ?? "");
   const [speaker, setSpeaker] = useState(seg.speaker ?? "");
   const [voice, setVoice] = useState(seg.voiceId ?? "");
   const [startStr, setStartStr] = useState(formatTimecode(seg.start));
   const [endStr, setEndStr] = useState(formatTimecode(seg.end));
   useEffect(() => setSource(seg.sourceText), [seg.sourceText]);
   useEffect(() => setTranslated(seg.translatedText), [seg.translatedText]);
-  useEffect(() => setDubbing(seg.dubbingText ?? ""), [seg.dubbingText]);
   useEffect(() => setSpeaker(seg.speaker ?? ""), [seg.speaker]);
   useEffect(() => setVoice(seg.voiceId ?? ""), [seg.voiceId]);
   useEffect(() => setStartStr(formatTimecode(seg.start)), [seg.start]);
@@ -4821,37 +5692,50 @@ function SubtitleRow(props: {
     }
   };
 
+  const ttsDotTitle =
+    ttsStatus.state === "generated"
+      ? `Voice ready · ${ttsStatus.durationSecs?.toFixed(2) ?? "?"}s`
+      : ttsStatus.state === "stale"
+        ? "Voice outdated — regenerate"
+        : "Voice not generated";
+
   return (
-    <div className={`subtitle-row${active ? " subtitle-row--active" : ""}`}>
-      <div className="subtitle-row-head">
-        <button
-          className="subtitle-row-id"
-          onClick={() => onSeek(seg.start)}
-          title="Seek video to this segment"
-        >
-          #{seg.id}
-        </button>
+    <div
+      className={`sub-row${selected ? " is-selected" : ""}${
+        active ? " is-playing" : ""
+      }`}
+      onMouseDown={() => onSelect(seg.id)}
+      role="row"
+    >
+      <div className="sub-cell sub-cell--time">
         <input
-          className="subtitle-timecode"
+          className="tc-input"
           value={startStr}
           onChange={(e) => setStartStr(e.target.value)}
           onBlur={commitTiming}
-          aria-label="Start time"
+          aria-label={`Start time of line ${seg.id}`}
         />
-        <span className="subtitle-timecode-sep">→</span>
         <input
-          className="subtitle-timecode"
+          className="tc-input tc-input--end"
           value={endStr}
           onChange={(e) => setEndStr(e.target.value)}
           onBlur={commitTiming}
-          aria-label="End time"
+          aria-label={`End time of line ${seg.id}`}
         />
-        <span className="subtitle-duration small">
+        <button
+          className="sub-seek"
+          onClick={() => onSeek(seg.start)}
+          title="Move playhead to this line"
+          tabIndex={-1}
+        >
           {(seg.end - seg.start).toFixed(2)}s
-        </span>
+        </button>
+      </div>
+
+      <div className="sub-cell">
         <input
-          className="subtitle-speaker"
-          placeholder="Speaker"
+          className="sub-inline"
+          placeholder="—"
           value={speaker}
           onChange={(e) => setSpeaker(e.target.value)}
           onBlur={() => {
@@ -4861,152 +5745,80 @@ function SubtitleRow(props: {
               });
             }
           }}
+          aria-label="Speaker"
         />
+      </div>
+
+      <div className="sub-cell">
+        <textarea
+          className="sub-text"
+          value={source}
+          placeholder="Source line"
+          onChange={(e) => setSource(e.target.value)}
+          onBlur={() => {
+            if (source !== seg.sourceText) onPatch(seg.id, { sourceText: source });
+          }}
+        />
+      </div>
+
+      <div className="sub-cell">
+        <textarea
+          className="sub-text sub-text--target"
+          value={translated}
+          placeholder="Translation"
+          onChange={(e) => setTranslated(e.target.value)}
+          onBlur={() => {
+            if (translated !== seg.translatedText)
+              onPatch(seg.id, { translatedText: translated });
+          }}
+        />
+      </div>
+
+      <div className="sub-cell">
         {voices.length > 0 ? (
           <select
-            className="subtitle-voice"
+            className="sub-inline"
             value={voice}
             onChange={(e) => {
               const next = e.target.value;
               setVoice(next);
               if ((seg.voiceId ?? "") !== next) {
-                onPatch(seg.id, {
-                  voiceId: next.trim() === "" ? null : next,
-                });
+                onPatch(seg.id, { voiceId: next.trim() === "" ? null : next });
               }
             }}
             aria-label="Voice"
           >
-            <option value="">Default voice</option>
+            <option value="">Default</option>
             {voices.map((v) => (
               <option key={v.id} value={v.id}>
                 {v.name}
-                {v.gender && v.gender !== "unknown" ? ` · ${v.gender}` : ""}
               </option>
             ))}
           </select>
         ) : (
           <input
-            className="subtitle-voice"
+            className="sub-inline"
             placeholder="Voice"
             value={voice}
             onChange={(e) => setVoice(e.target.value)}
             onBlur={() => {
               if ((seg.voiceId ?? "") !== voice) {
-                onPatch(seg.id, {
-                  voiceId: voice.trim() === "" ? null : voice,
-                });
+                onPatch(seg.id, { voiceId: voice.trim() === "" ? null : voice });
               }
             }}
           />
         )}
       </div>
-      <div className="subtitle-row-body">
-        <textarea
-          className="subtitle-text subtitle-text--source"
-          rows={2}
-          value={source}
-          placeholder="Source text"
-          onChange={(e) => setSource(e.target.value)}
-          onBlur={() => {
-            if (source !== seg.sourceText) {
-              onPatch(seg.id, { sourceText: source });
-            }
-          }}
-        />
-        <textarea
-          className="subtitle-text subtitle-text--translated"
-          rows={2}
-          value={translated}
-          placeholder="Translated text"
-          onChange={(e) => setTranslated(e.target.value)}
-          onBlur={() => {
-            if (translated !== seg.translatedText) {
-              onPatch(seg.id, { translatedText: translated });
-            }
-          }}
-        />
-        <textarea
-          className="subtitle-text subtitle-text--dubbing"
-          rows={2}
-          value={dubbing}
-          placeholder="Dubbing text (spoken line)"
-          onChange={(e) => setDubbing(e.target.value)}
-          onBlur={() => {
-            if (dubbing !== (seg.dubbingText ?? "")) {
-              onPatch(seg.id, { dubbingText: dubbing });
-            }
-          }}
-        />
-      </div>
-      <div className="subtitle-row-actions">
+
+      <div className="sub-cell sub-cell--status">
         <span
-          className={`tts-badge tts-badge--${ttsStatus.state}`}
-          title={ttsStatus.hint}
-        >
-          {ttsStatus.state === "generated"
-            ? `✓ Generated · ${ttsStatus.durationSecs?.toFixed(2) ?? "?"}s`
-            : ttsStatus.state === "stale"
-              ? "⚠ Outdated"
-              : "⚠ Missing"}
-        </span>
+          className={`state-dot state-dot--${ttsStatus.state}`}
+          title={ttsDotTitle}
+        />
         <span
-          className={`sync-badge sync-badge--${syncStatus.state}`}
-          title={syncStatus.hint}
-        >
-          {syncStatus.label}
-        </span>
-        <button
-          className="btn ghost small"
-          onClick={() => onTtsPreview(seg.id)}
-          title="Preview voice for this line"
-        >
-          ▶ Preview voice
-        </button>
-        <button
-          className="btn ghost small"
-          onClick={() => onTtsRegenerate(seg.id)}
-          title="Regenerate voice for this line"
-        >
-          Regenerate voice
-        </button>
-        <button
-          className="btn ghost small"
-          disabled={syncStatus.state === "missing" || syncStatus.state === "stale"}
-          onClick={() => onSyncPreview(seg.id)}
-          title="Preview time-aligned voice for this line"
-        >
-          ▶ Preview synced
-        </button>
-        <button
-          className="btn ghost small"
-          onClick={() => onSyncRegenerate(seg.id)}
-          title="Rebuild synced WAV for this line"
-        >
-          Resync
-        </button>
-        <button
-          className="btn ghost small"
-          disabled={!canSplitAt}
-          onClick={() => onSplit(seg.id, currentTime)}
-          title={
-            hasVideo
-              ? "Split at the current video playhead"
-              : "Video preview required to split"
-          }
-        >
-          Split at playhead
-        </button>
-        <button
-          className="btn ghost small"
-          onClick={() => onMerge(seg.id)}
-          title="Merge with the next segment"
-        >
-          Merge next
-        </button>
-        <button className="btn danger small" onClick={() => onDelete(seg.id)}>
-          Delete
-        </button>
+          className={`state-dot state-dot--${syncStatus.state}`}
+          title={`Sync: ${syncStatus.label} — ${syncStatus.hint}`}
+        />
       </div>
     </div>
   );
@@ -5944,12 +6756,10 @@ function TtsPanel(props: {
   summary: TtsSummary | null;
   subtitleDoc: SubtitleDoc | null;
   engine: string;
-  qualityMode: "fast" | "balanced" | "quality";
   voiceId: string;
   settings: TtsSettings;
-  onEngineChange: (engine: string) => void;
-  onQualityModeChange: (mode: "fast" | "balanced" | "quality") => void;
   onVoiceChange: (voiceId: string) => void;
+  onSelectModel: (preset: TtsRecommendedVoicePreset) => Promise<void>;
   onSettingsChange: (settings: Partial<TtsSettings>) => void;
   activeJob: JobSnapshot | null;
   progress: number;
@@ -5977,12 +6787,10 @@ function TtsPanel(props: {
     summary,
     subtitleDoc,
     engine,
-    qualityMode,
     voiceId,
     settings,
-    onEngineChange,
-    onQualityModeChange,
     onVoiceChange,
+    onSelectModel,
     onSettingsChange,
     activeJob,
     progress,
@@ -6055,21 +6863,30 @@ function TtsPanel(props: {
     enginePresets.find((p) => p.isDefault) ??
     enginePresets[0] ??
     null;
-  const canAutoDownloadVoice =
-    engine === "piper" &&
-    !!targetPreset &&
-    !!currentEngineInfo?.available &&
-    hasSubtitles;
-  const willAutoDownloadVoice = !voiceId && canAutoDownloadVoice;
-  const f5Ready =
-    engine !== "f5-vietnamese" ||
-    (!!env?.f5RuntimeInstalled && !!env.f5Model.installed);
+  const selectedPreset =
+    recommendedPresets.find((preset) =>
+      ttsPresetSelected(preset, engine, voiceId),
+    ) ?? targetPreset;
+  const willAutoDownloadVoice =
+    !!selectedPreset && !ttsPresetInstalled(selectedPreset, voices, env);
+  const piperReady = engine !== "piper" || !!env?.piperInstalled;
+  const f5RuntimeReady =
+    engine !== "f5-vietnamese" || !!env?.f5RuntimeInstalled;
   const canGenerate =
-    (!!voiceId || willAutoDownloadVoice) &&
-    !!currentEngineInfo?.available &&
-    f5Ready &&
+    piperReady &&
+    f5RuntimeReady &&
     hasSubtitles &&
-    !activeJob;
+    !activeJob &&
+    (engine === "f5-vietnamese"
+      ? enginesVoices.length > 0
+      : !!voiceId || willAutoDownloadVoice);
+  // F5 has no stock voices: it clones whatever reference clip it is given,
+  // so with the model installed and no profile yet the only way forward is
+  // the reference form. Show it instead of hiding it behind "Advanced".
+  const needsF5Profile =
+    engine === "f5-vietnamese" &&
+    !!env?.f5Model.installed &&
+    enginesVoices.length === 0;
 
   const handleCreateProfile = async () => {
     setProfileError(null);
@@ -6092,43 +6909,80 @@ function TtsPanel(props: {
     }
   };
 
+  const catalogPresets = [...recommendedPresets].sort((a, b) => {
+    const lang = (targetLanguage || "").toLowerCase();
+    const aHit = a.targetLanguages.includes(lang) ? 0 : 1;
+    const bHit = b.targetLanguages.includes(lang) ? 0 : 1;
+    if (aHit !== bHit) return aHit - bHit;
+    if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+    return a.label.localeCompare(b.label);
+  });
+
   return (
     <div className="tts-panel">
+      <div className="form-section">
+        <div className="form-section-title">Engine</div>
+        <div className="tts-models" role="radiogroup" aria-label="TTS model">
+          {catalogPresets.length === 0 && (
+            <div className="small muted">No downloadable models listed yet.</div>
+          )}
+          {catalogPresets.map((preset) => {
+            const installed = ttsPresetInstalled(preset, voices, env);
+            const selected = ttsPresetSelected(preset, engine, voiceId);
+            const downloading = !!downloadJob && selected;
+            const status = downloading
+              ? "Downloading"
+              : installed
+                ? "Installed"
+                : "Not installed — will download";
+            const runtimeMissing =
+              preset.engine === "f5-vietnamese" && !env?.f5RuntimeInstalled;
+            return (
+              <label
+                key={preset.preset}
+                className={`tts-model${selected ? " tts-model--active" : ""}`}
+              >
+                <input
+                  type="radio"
+                  name="tts-model"
+                  checked={selected}
+                  disabled={!!activeJob || busy || !!downloadJob}
+                  onChange={() => void onSelectModel(preset)}
+                />
+                <span>
+                  <b>{preset.label}</b>
+                  <span className="tts-model-meta">
+                    {preset.engine === "f5-vietnamese"
+                      ? "High quality · GPU recommended"
+                      : "Fast · Lightweight"}
+                    {" · "}
+                    {humanBytes(preset.approxSizeBytes)}
+                    {preset.commercialUse === false ? " · non-commercial" : ""}
+                    {runtimeMissing ? " · runtime will auto-install" : ""}
+                  </span>
+                  <span className="tts-model-tags">
+                    <span className="badge">
+                      {preset.engine === "f5-vietnamese" ? "QUALITY" : "FAST"}
+                    </span>
+                    <span className="badge">{preset.quality}</span>
+                  </span>
+                </span>
+                <span
+                  className={`status-badge tts-model-status ${
+                    downloading ? "warn" : installed ? "ok" : "err"
+                  }`}
+                >
+                  {status}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="form-section">
+        <div className="form-section-title">Voice &amp; delivery</div>
       <div className="tts-grid">
-        <label>
-          <span>Quality mode</span>
-          <select
-            value={qualityMode}
-            onChange={(event) =>
-              onQualityModeChange(
-                event.target.value as "fast" | "balanced" | "quality",
-              )
-            }
-            disabled={!!activeJob}
-          >
-            <option value="fast">FAST · Piper</option>
-            <option value="balanced">BALANCED · Piper</option>
-            <option value="quality">QUALITY · F5-TTS Vietnamese</option>
-          </select>
-        </label>
-        <label>
-          <span>Engine</span>
-          <select
-            value={engine}
-            onChange={(e) => onEngineChange(e.target.value)}
-            disabled={!!activeJob}
-          >
-            {availableEngines.length === 0 && (
-              <option value={engine}>{engine}</option>
-            )}
-            {availableEngines.map((e) => (
-              <option key={e.id} value={e.id} disabled={!e.available}>
-                {e.name}
-                {e.available ? "" : " (not installed)"}
-              </option>
-            ))}
-          </select>
-        </label>
         <label>
           <span>
             Voice
@@ -6223,9 +7077,12 @@ function TtsPanel(props: {
           </label>
         )}
       </div>
+      </div>
 
       {env && (
-        <div className="tts-env small">
+        <details className="disclosure">
+          <summary>Runtime environment</summary>
+          <div className="tts-env small">
           <div>
             <span>Voices dir</span>{" "}
             <code className="mono small">{env.ttsRoot}</code>
@@ -6238,7 +7095,7 @@ function TtsPanel(props: {
             <span>F5 runtime</span>{" "}
             {env.f5RuntimeInstalled
               ? "✓"
-              : "not installed (run scripts/setup-f5.ps1)"}
+              : "not installed — will auto-install when you pick F5"}
           </div>
           <div>
             <span>F5 model</span>{" "}
@@ -6246,7 +7103,8 @@ function TtsPanel(props: {
               ? `✓ ${humanBytes(env.f5Model.approxSizeBytes)}`
               : "not installed"}
           </div>
-        </div>
+          </div>
+        </details>
       )}
 
       {engine === "f5-vietnamese" && env && (
@@ -6290,14 +7148,27 @@ function TtsPanel(props: {
           )}
           {env.f5Model.installed && (
             <div className="tts-advanced">
-              <button
-                className="btn ghost small"
-                type="button"
-                onClick={() => setAdvancedOpen((value) => !value)}
-              >
-                {advancedOpen ? "Hide advanced" : "Advanced · reference voice"}
-              </button>
-              {advancedOpen && (
+              {needsF5Profile ? (
+                <>
+                  <div className="banner banner--info small">
+                    <b>QUALITY needs a reference voice.</b> F5 clones the voice
+                    from a clip you provide: pick a clean 5–15s WAV of the
+                    target voice and type its exact transcript below.
+                  </div>
+                  <div className="form-section-title">
+                    Reference voice profile
+                  </div>
+                </>
+              ) : (
+                <button
+                  className="btn ghost small"
+                  type="button"
+                  onClick={() => setAdvancedOpen((value) => !value)}
+                >
+                  {advancedOpen ? "Hide advanced" : "Advanced · reference voice"}
+                </button>
+              )}
+              {(advancedOpen || needsF5Profile) && (
                 <div className="tts-grid">
                   <label>
                     <span>Profile ID</span>
@@ -6392,7 +7263,7 @@ function TtsPanel(props: {
                   </label>
                   <div className="tts-actions">
                     <button
-                      className="btn"
+                      className={`btn${needsF5Profile ? " primary" : ""}`}
                       type="button"
                       disabled={
                         !profileId.trim() ||
@@ -6500,8 +7371,8 @@ function TtsPanel(props: {
       {downloadJob ? (
         <div className="tts-progress">
           <ProgressRow
-            label={`Downloading voice${
-              targetPreset ? ` — ${targetPreset.label}` : ""
+            label={`Downloading${
+              selectedPreset ? ` — ${selectedPreset.label}` : ""
             }`}
             pct={downloadProgress}
           />
@@ -6518,12 +7389,12 @@ function TtsPanel(props: {
             onClick={onGenerateMissing}
             disabled={!canGenerate || busy}
             title={
-              willAutoDownloadVoice && targetPreset
-                ? `Will download ${targetPreset.label} (~${humanBytes(targetPreset.approxSizeBytes)}) and then generate.`
+              willAutoDownloadVoice && selectedPreset
+                ? `Will download ${selectedPreset.label} (~${humanBytes(selectedPreset.approxSizeBytes)}) and then generate.`
                 : undefined
             }
           >
-            {willAutoDownloadVoice && targetPreset
+            {willAutoDownloadVoice && selectedPreset
               ? "Download voice & generate missing"
               : "Generate missing"}
           </button>
@@ -6532,13 +7403,13 @@ function TtsPanel(props: {
             onClick={onGenerateAll}
             disabled={!canGenerate || busy}
             title={
-              willAutoDownloadVoice && targetPreset
-                ? `Will download ${targetPreset.label} (~${humanBytes(targetPreset.approxSizeBytes)}) and then generate.`
+              willAutoDownloadVoice && selectedPreset
+                ? `Will download ${selectedPreset.label} (~${humanBytes(selectedPreset.approxSizeBytes)}) and then generate.`
                 : undefined
             }
           >
-            {willAutoDownloadVoice && targetPreset
-              ? `Download voice & generate all (${targetPreset.label})`
+            {willAutoDownloadVoice && selectedPreset
+              ? `Download model & generate all (${selectedPreset.label})`
               : "Generate all"}
           </button>
           {activeJob && (
@@ -6571,21 +7442,21 @@ function TtsPanel(props: {
           Build subtitles before generating voice.
         </div>
       )}
-      {hasSubtitles && !voiceId && willAutoDownloadVoice && !downloadJob && (
+      {hasSubtitles && willAutoDownloadVoice && selectedPreset && !downloadJob && (
         <div className="banner">
-          No voice installed yet. Clicking <em>Generate</em> will
-          download <b>{targetPreset!.label}</b> to{" "}
-          <code>{env?.ttsRoot ?? "<models>/tts"}</code> and then start
-          synthesis. This is a one-time download.
+          <b>{selectedPreset.label}</b> is not installed yet. Selecting it or
+          clicking <em>Generate</em> downloads it to{" "}
+          <code>{env?.ttsRoot ?? "<models>/tts"}</code> once, then synthesis
+          stays offline.
         </div>
       )}
-      {hasSubtitles && !voiceId && !canAutoDownloadVoice && (
+      {hasSubtitles &&
+        engine === "piper" &&
+        !voiceId &&
+        !willAutoDownloadVoice && (
         <div className="empty-state small">
-          Install at least one voice model under{" "}
-          <code className="mono small">
-            {env?.ttsRoot ?? "<models>/tts"}
-          </code>
-          , then click <em>Rescan</em>.
+          Choose a TTS model above. If it is not installed, the app will
+          download it automatically.
         </div>
       )}
 
@@ -6666,6 +7537,104 @@ function Panel(props: { title: string; children: React.ReactNode }) {
       <h3>{props.title}</h3>
       <div className="panel-body">{props.children}</div>
     </div>
+  );
+}
+
+// Export is the last, explicit step of the workflow. "Run all" stops at
+// the mix, so this dialog is where the user decides what the finished
+// movie becomes: a file on disk, or a published video.
+function ExportModal(props: {
+  renderedPath: string | null;
+  outputPath: string | null;
+  onClose: () => void;
+  onLocal: () => void;
+  onSocial: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Export"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2>Export</h2>
+        <div className="modal-hint">
+          {props.renderedPath
+            ? "This movie is already rendered. Export again to a new location, or publish it."
+            : "Everything is transcribed, dubbed and mixed. Choose where the finished movie should go."}
+        </div>
+
+        <div className="export-options">
+          <button className="export-option" onClick={props.onLocal}>
+            <span className="export-option-icon">
+              <IconFolder size={18} />
+            </span>
+            <span className="export-option-main">
+              <b>Local file</b>
+              <span className="export-option-meta">
+                Render the dubbed movie to a file on this computer.
+                {props.outputPath ? ` Default: ${props.outputPath}` : ""}
+              </span>
+            </span>
+          </button>
+
+          <button className="export-option" onClick={props.onSocial}>
+            <span className="export-option-icon">
+              <IconExport size={18} />
+            </span>
+            <span className="export-option-main">
+              <b>YouTube</b>
+              <span className="export-option-meta">
+                Render if needed, then upload with title, description and
+                translated subtitles.
+              </span>
+            </span>
+          </button>
+        </div>
+
+        <div className="modal-actions">
+          <button className="btn ghost" onClick={props.onClose}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatusBar(props: {
+  ready: boolean;
+  job: { label: string; job: JobSnapshot } | null;
+  progress: number;
+  time: number;
+  duration: number | null;
+}) {
+  const pct = Math.round(Math.max(0, Math.min(1, props.progress)) * 100);
+  return (
+    <footer className="statusbar">
+      <div className="statusbar-left">
+        {props.job ? (
+          <div className="statusbar-job">
+            <span>{props.job.label}</span>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${pct}%` }} />
+            </div>
+            <span className="mono">{pct}%</span>
+          </div>
+        ) : (
+          <span>{props.ready ? "Ready" : "Working"}</span>
+        )}
+      </div>
+      <div className="statusbar-right">
+        <span className="statusbar-tc">
+          {formatTimecode(props.time)}
+          {" / "}
+          {props.duration != null ? formatTimecode(props.duration) : "--:--"}
+        </span>
+      </div>
+    </footer>
   );
 }
 

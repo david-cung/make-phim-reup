@@ -153,94 +153,96 @@ export default function Dashboard() {
             </div>
           )}
 
-          <header className="dashboard-header">
-            <div>
-              <h1>Projects</h1>
-              <div className="dashboard-sub">
-                {projects.length === 0
-                  ? "No projects yet."
-                  : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
-              </div>
-            </div>
-          </header>
-
           {error ? <div className="banner banner--error">{error}</div> : null}
 
-          {projects.length === 0 ? (
-            <div className="panel">
-              <div className="empty-state">
-                <div className="icon-64" aria-hidden="true">
-                  <IconFilm size={22} />
-                </div>
-                <div className="empty-title">
-                  Import a movie to start translating
-                </div>
-                <div className="empty-hint">
-                  Create a project, drop in a video, and Local Movie Translator
-                  will transcribe, translate, dub and re-render it — entirely
-                  on-device.
-                </div>
-                <button
-                  className="btn primary"
-                  onClick={() => setModalOpen(true)}
-                >
-                  <IconPlus size={14} />
-                  <span>New Project</span>
-                </button>
-              </div>
+          <section className="hub-section">
+            <div className="hub-section-head">
+              <h2>Recent projects</h2>
+              <span className="hub-count">
+                {projects.length === 0
+                  ? "Nothing yet"
+                  : `${projects.length} project${projects.length === 1 ? "" : "s"}`}
+              </span>
             </div>
-          ) : (
-            <table className="projects-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Languages</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
+
+            {projects.length === 0 ? (
+              <button
+                className="dropzone"
+                onClick={() => setModalOpen(true)}
+                type="button"
+              >
+                <span className="dropzone-icon" aria-hidden="true">
+                  <IconFilm size={22} />
+                </span>
+                <span className="dropzone-title">Start a new project</span>
+                <span className="dropzone-hint">
+                  Import a movie and this studio will transcribe, translate, dub
+                  and re-render it — entirely on your machine.
+                </span>
+                <span className="btn primary dropzone-cta">
+                  <IconPlus size={14} />
+                  <span>New project</span>
+                </span>
+              </button>
+            ) : (
+              <div className="hub-grid">
                 {projects.map((p) => (
-                  <tr key={p.id}>
-                    <td>
-                      <Link to={`/projects/${p.id}`}>{p.name}</Link>
-                    </td>
-                    <td>
-                      <span className="mono">
-                        {p.sourceLanguage} → {p.targetLanguage}
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`status status--${p.status}`}>
+                  <article key={p.id} className="proj-tile">
+                    <Link
+                      to={`/projects/${p.id}`}
+                      className="proj-thumb"
+                      aria-label={`Open ${p.name}`}
+                    >
+                      <IconFilm size={22} />
+                      <span className={`proj-chip proj-chip--${p.status}`}>
                         {p.status}
                       </span>
-                    </td>
-                    <td className="muted">
-                      {new Date(p.updatedAt).toLocaleString()}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      <button
-                        className="btn icon"
-                        title={`Delete ${p.name}`}
-                        aria-label={`Delete ${p.name}`}
-                        onClick={async () => {
-                          if (!confirm(`Delete "${p.name}"?`)) return;
-                          try {
-                            await deleteProject(p.id);
-                          } catch (e) {
-                            setError(formatDashboardError(e));
-                          }
-                        }}
-                      >
-                        <IconTrash size={15} />
-                      </button>
-                    </td>
-                  </tr>
+                    </Link>
+                    <div className="proj-info">
+                      <Link to={`/projects/${p.id}`} className="proj-name">
+                        {p.name}
+                      </Link>
+                      <div className="proj-meta">
+                        <span className="mono">
+                          {p.sourceLanguage.toUpperCase()} →{" "}
+                          {p.targetLanguage.toUpperCase()}
+                        </span>
+                        <span className="proj-dot" />
+                        <span>{relativeTime(p.updatedAt)}</span>
+                      </div>
+                    </div>
+                    <button
+                      className="btn icon proj-del"
+                      title={`Delete ${p.name}`}
+                      aria-label={`Delete ${p.name}`}
+                      onClick={async () => {
+                        if (!confirm(`Delete "${p.name}"?`)) return;
+                        try {
+                          await deleteProject(p.id);
+                        } catch (e) {
+                          setError(formatDashboardError(e));
+                        }
+                      }}
+                    >
+                      <IconTrash size={15} />
+                    </button>
+                  </article>
                 ))}
-              </tbody>
-            </table>
-          )}
+
+                <button
+                  className="proj-tile proj-tile--new"
+                  onClick={() => setModalOpen(true)}
+                  type="button"
+                >
+                  <span className="proj-new-mark">
+                    <IconPlus size={18} />
+                  </span>
+                  <span className="proj-new-label">New project</span>
+                  <span className="proj-new-hint">Import a movie to start</span>
+                </button>
+              </div>
+            )}
+          </section>
         </div>
       </main>
 
@@ -260,6 +262,24 @@ export default function Dashboard() {
       ) : null}
     </div>
   );
+}
+
+/** "Last edited 2h ago" style stamp used by the project hub tiles. */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return "Edited just now";
+  if (mins < 60) return `Edited ${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `Edited ${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "Edited yesterday";
+  if (days < 7) return `Edited ${days}d ago`;
+  return `Edited ${new Date(then).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  })}`;
 }
 
 function formatDashboardError(err: unknown): string {

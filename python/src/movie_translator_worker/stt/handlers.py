@@ -158,7 +158,11 @@ def stt_transcribe(params: dict[str, Any], ctx: HandlerContext) -> dict[str, Any
     except ProviderCancelled as e:
         raise RpcError(RpcErrorCode.CANCELLED, "transcription cancelled by user") from e
     except ProviderError as e:
-        raise RpcError(e.code, e.message, data={"recoverable": e.recoverable}) from e
+        raise RpcError(
+            e.code,
+            e.message,
+            data={"recoverable": e.recoverable, "model": options.model},
+        ) from e
 
     if ctx.cancelled():
         raise RpcError(RpcErrorCode.CANCELLED, "transcription cancelled by user")

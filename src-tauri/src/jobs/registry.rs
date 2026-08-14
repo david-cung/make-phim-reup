@@ -67,6 +67,14 @@ impl JobRegistry {
         Ok(handle)
     }
 
+    pub fn find_active(&self, project_id: &str, stage: JobStage) -> Option<JobHandle> {
+        self.inner
+            .read()
+            .values()
+            .find(|h| h.project_id == project_id && h.stage == stage)
+            .cloned()
+    }
+
     pub fn get(&self, id: &str) -> Option<JobHandle> {
         self.inner.read().get(id).cloned()
     }
@@ -129,6 +137,8 @@ mod tests {
             .register("b".into(), "p".into(), JobStage::ExtractAudio)
             .unwrap_err();
         assert!(matches!(err, JobRegistryError::Conflict { .. }));
+        let found = reg.find_active("p", JobStage::ExtractAudio).unwrap();
+        assert_eq!(found.id, "a");
     }
 
     #[test]

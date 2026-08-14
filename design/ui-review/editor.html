@@ -1,0 +1,266 @@
+<!doctype html>
+<!--
+  Static visual-review harness. It mirrors the DOM that Project.tsx renders
+  and loads the real stylesheet, so the layered surfaces, densities and the
+  dark media workspace can be checked without booting Tauri IPC.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Editor — visual review</title>
+    <link rel="stylesheet" href="../../src/styles/global.css" />
+    <style>
+      html, body, #root { height: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="app-shell has-status">
+        <header class="topbar">
+          <div class="topbar-left">
+            <a class="app-brand"><span class="brand-mark"></span><span class="brand-title">Movie Translator</span></a>
+            <span class="topbar-divider"></span>
+            <div class="topbar-project">
+              <span class="pname">Mountain Road (2019) 4K</span>
+              <span class="pmeta">EN → VI</span>
+            </div>
+            <span class="save-status"><span class="save-dot"></span>Saved</span>
+          </div>
+          <div class="topbar-center">
+            <div class="actions">
+              <button class="btn icon" title="Undo">↶</button>
+              <button class="btn icon" title="Redo">↷</button>
+            </div>
+          </div>
+          <div class="topbar-right">
+            <div class="worker-badge worker-badge--ok"><span class="worker-dot"></span><span class="worker-label">Worker ready</span></div>
+            <button class="btn">Save</button>
+            <button class="btn icon">⚙</button>
+            <button class="btn">Run all</button>
+            <button class="btn primary">Export</button>
+          </div>
+        </header>
+
+        <main class="app-body">
+          <div class="download-status-slot is-empty"></div>
+
+          <aside class="navcol">
+            <nav class="nav">
+              <div class="nav-group">
+                <div class="nav-group-title">Workspace</div>
+                <button class="nav-item"><span class="nav-icon">▣</span><span class="nav-label">Media</span><span class="nav-state nav-state--done"></span></button>
+                <button class="nav-item active"><span class="nav-icon">≡</span><span class="nav-label">Subtitles</span><span class="nav-state nav-state--done"></span></button>
+                <button class="nav-item"><span class="nav-icon">◍</span><span class="nav-label">Voices</span><span class="nav-state nav-state--active"></span></button>
+                <button class="nav-item"><span class="nav-icon">◫</span><span class="nav-label">Mix</span><span class="nav-state"></span></button>
+              </div>
+              <div class="nav-group">
+                <div class="nav-group-title">AI</div>
+                <button class="nav-item"><span class="nav-icon">∿</span><span class="nav-label">Transcribe</span><span class="nav-state nav-state--done"></span></button>
+                <button class="nav-item"><span class="nav-icon">✳</span><span class="nav-label">Translate</span><span class="nav-state nav-state--done"></span></button>
+              </div>
+              <div class="nav-group">
+                <div class="nav-group-title">Project</div>
+                <button class="nav-item"><span class="nav-icon">⤓</span><span class="nav-label">Render</span><span class="nav-state"></span></button>
+                <a class="nav-item"><span class="nav-icon">⚙</span><span class="nav-label">Models &amp; settings</span><span class="nav-state"></span></a>
+              </div>
+            </nav>
+            <div class="nav-browser">
+              <div class="panel-head"><span class="panel-head-title">Subtitles</span></div>
+              <div class="nav-browser-body">
+                <div class="sidepane-group-title">Lines</div>
+                <div class="asset"><div class="asset-icon">≡</div><div class="asset-main"><div class="asset-name">interstellar.vi.srt</div><div class="asset-meta">1 284 lines · 3 speakers</div></div></div>
+                <div class="asset"><div class="asset-icon">∿</div><div class="asset-main"><div class="asset-name">interstellar.wav</div><div class="asset-meta">168.4 MB · 2:49:03</div></div></div>
+                <div class="sidepane-group-title">Status</div>
+                <div class="asset-empty">Voice generated for 1 240 of 1 284 lines.</div>
+              </div>
+            </div>
+          </aside>
+
+          <div class="workspace">
+            <div class="workspace-center">
+              <div class="workspace-split">
+                <!-- Subtitles section: editor-heavy split (no is-media-first) -->
+                <div class="stage">
+                  <div class="stage-canvas"></div>
+                  <div class="stage-toolbar">
+                    <div class="stage-toolbar-left">
+                      <button class="icon-btn">◀◀</button>
+                      <button class="icon-btn">▶</button>
+                      <button class="icon-btn">▶▶</button>
+                      <span class="tc">00:12:32<span class="tc-sep"> / </span>02:49:03</span>
+                    </div>
+                    <input class="stage-scrubber" type="range" value="14" />
+                    <div class="stage-toolbar-right">
+                      <button class="icon-btn">🔊</button>
+                      <input class="stage-volume" type="range" value="80" />
+                      <button class="icon-btn">⛶</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="workpane">
+                  <div class="workpane-header"><span class="workpane-title">Subtitle Editor</span></div>
+                  <div class="workpane-body">
+                    <div class="subtitle-panel">
+                      <div class="subtitle-summary">
+                        <div class="kv-row"><span>Segments</span><b>1 284 · 1 284 translated · 3 speakers</b></div>
+                      </div>
+                      <div class="subtitle-toolbar">
+                        <input class="subtitle-filter" type="search" placeholder="Filter…" />
+                        <button class="btn ghost small">Rebuild from transcript</button>
+                        <button class="btn ghost small">Add row</button>
+                        <button class="btn ghost small">Import</button>
+                        <div class="subtitle-export">
+                          <select class="small"><option>SRT</option></select>
+                          <select class="small"><option>Translated only</option></select>
+                          <button class="btn small">Export</button>
+                        </div>
+                      </div>
+                      <div class="sub-table">
+                        <div class="sub-head"><span>Time</span><span>Speaker</span><span>Original</span><span>Translation</span><span>Voice</span><span class="sub-head-status">St</span></div>
+                        <div class="subtitle-list">
+                          <div id="rows"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="timeline on-canvas">
+              <div class="timeline-header">
+                <div class="timeline-title"><span class="timeline-label">Timeline</span><span class="timeline-tc">00:12:32<span class="tc-sep"> / </span>02:49:03</span></div>
+                <div class="zoom-controls"><span class="zoom-readout">24 px/s</span><button>−</button><button>+</button></div>
+              </div>
+              <div class="timeline-body">
+                <div class="tracks-labels">
+                  <div class="track-label"><span class="track-swatch video"></span><span class="track-name">V1 Video</span></div>
+                  <div class="track-label"><span class="track-swatch audio"></span><span class="track-name">A1 Audio</span></div>
+                  <div class="track-label"><span class="track-swatch voice"></span><span class="track-name">A2 Voice</span><span class="track-count">18</span></div>
+                  <div class="track-label"><span class="track-swatch subtitle"></span><span class="track-name">S1 Subs</span><span class="track-count">18</span></div>
+                </div>
+                <div class="tracks-canvas">
+                  <div style="width:2400px;position:relative">
+                    <div class="ruler" style="width:2400px" id="ruler"></div>
+                    <div class="track-lanes">
+                      <div class="track-lane"><div class="track-clip video" style="left:0;width:2400px">Video track</div></div>
+                      <div class="track-lane"><div class="track-clip audio" style="left:0;width:2400px">Original audio</div></div>
+                      <div class="track-lane" id="lane-voice"></div>
+                      <div class="track-lane" id="lane-sub"></div>
+                    </div>
+                    <div class="playhead" style="left:300px"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside class="inspector">
+            <div class="panel-head"><span class="panel-head-title">Subtitle · 042</span><div class="panel-head-tools"><button class="btn icon">✕</button></div></div>
+            <div class="inspector-body">
+              <div class="section">
+                <div class="section-title">Timing</div>
+                <div class="prop-grid">
+                  <span>Start</span><b class="mono">00:12:32.400</b>
+                  <span>End</span><b class="mono">00:12:35.900</b>
+                  <span>Duration</span><b class="mono">3.50s</b>
+                  <span>Speaker</span><b>Cooper</b>
+                </div>
+                <div class="actions"><button class="btn small">Split at playhead</button><button class="btn small">Merge next</button></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Text</div>
+                <label class="field"><span>Original</span><div class="readout">Bring the map and keep the lantern lit until we reach the ridge.</div></label>
+                <label class="field"><span>Translation</span><textarea rows="3">Mang theo tấm bản đồ và giữ đèn sáng đến khi tới sườn núi.</textarea></label>
+                <label class="field"><span>Dubbing line</span><textarea rows="3" placeholder="Spoken line"></textarea></label>
+              </div>
+              <div class="section">
+                <div class="section-title">Voice</div>
+                <label class="field"><span>Voice</span><select><option>Male 01 · vi</option></select></label>
+                <div class="actions"><button class="btn primary small">Generate voice</button><button class="btn small">Preview</button></div>
+              </div>
+              <div class="section">
+                <div class="section-title">Sync</div>
+                <div class="actions"><button class="btn small">Resync line</button><button class="btn small">Preview synced</button></div>
+                <button class="btn danger small" style="align-self:flex-start">Delete line</button>
+              </div>
+            </div>
+          </aside>
+        </main>
+
+        <footer class="statusbar">
+          <div class="statusbar-left">
+            <span class="statusbar-job"><span class="state-dot state-dot--ok"></span>Ready</span>
+          </div>
+          <div class="statusbar-right">
+            <span class="statusbar-tc">00:12:32 / 02:49:03</span>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <script>
+      const lines = [
+        ["00:12:30.100", "00:12:32.300", "Speaker 01", "The train leaves before sunrise.", "Chuyến tàu khởi hành trước lúc rạng sáng.", "generated", "fits"],
+        ["00:12:32.400", "00:12:35.900", "Speaker 01", "Bring the map and keep the lantern lit until we reach the ridge.", "Mang theo tấm bản đồ và giữ đèn sáng đến khi tới sườn núi.", "generated", "adjusted"],
+        ["00:12:36.050", "00:12:38.700", "Speaker 02", "Nobody has crossed that valley in years.", "Nhiều năm rồi không ai băng qua thung lũng đó.", "stale", "fits"],
+        ["00:12:39.000", "00:12:41.120", "Speaker 02", "Then we will be the first ones.", "Vậy thì chúng ta sẽ là những người đầu tiên.", "missing", "missing"],
+        ["00:12:41.500", "00:12:44.900", "Speaker 01", "Wait for my signal, and do not look back at the gate.", "Đợi tín hiệu của tôi, và đừng ngoảnh lại nhìn cánh cổng.", "generated", "too_long"],
+        ["00:12:45.200", "00:12:47.400", "Speaker 03", "The radio is quiet again tonight.", "Đêm nay bộ đàm lại im lặng.", "generated", "fits"],
+        ["00:12:47.800", "00:12:50.300", "Speaker 03", "Give me two minutes and I will find the frequency.", "Cho tôi hai phút, tôi sẽ tìm được tần số.", "generated", "fits"],
+      ];
+      const rowsEl = document.getElementById("rows");
+      rowsEl.style.position = "relative";
+      rowsEl.style.height = lines.length * 52 + "px";
+      lines.forEach((l, i) => {
+        const wrap = document.createElement("div");
+        wrap.className = "subtitle-row-wrap";
+        wrap.style.cssText = `position:absolute;top:${i * 52}px;left:0;right:0;height:52px`;
+        wrap.innerHTML = `
+          <div class="sub-row${i === 1 ? " is-selected" : ""}${i === 2 ? " is-playing" : ""}">
+            <div class="sub-cell sub-cell--time">
+              <input class="tc-input" value="${l[0]}" />
+              <input class="tc-input tc-input--end" value="${l[1]}" />
+              <button class="sub-seek">2.20s</button>
+            </div>
+            <div class="sub-cell"><input class="sub-inline" value="${l[2]}" /></div>
+            <div class="sub-cell"><textarea class="sub-text">${l[3]}</textarea></div>
+            <div class="sub-cell"><textarea class="sub-text sub-text--target">${l[4]}</textarea></div>
+            <div class="sub-cell"><select class="sub-inline"><option>Male 01</option></select></div>
+            <div class="sub-cell sub-cell--status">
+              <span class="state-dot state-dot--${l[5]}"></span>
+              <span class="state-dot state-dot--${l[6]}"></span>
+            </div>
+          </div>`;
+        rowsEl.appendChild(wrap);
+      });
+
+      const ruler = document.getElementById("ruler");
+      for (let t = 0; t <= 100; t += 5) {
+        const tick = document.createElement("div");
+        const major = t % 25 === 0;
+        tick.className = "ruler-tick" + (major ? " major" : "");
+        tick.style.left = t * 24 + "px";
+        tick.textContent = major ? `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}` : "";
+        ruler.appendChild(tick);
+      }
+      const mk = (lane, cls) => {
+        const el = document.getElementById(lane);
+        let at = 6;
+        for (let i = 0; i < 14; i++) {
+          const w = 40 + ((i * 37) % 90);
+          const clip = document.createElement("div");
+          clip.className = `track-clip ${cls}` + (i === 3 ? " selected" : "");
+          clip.style.left = at + "px";
+          clip.style.width = w + "px";
+          clip.textContent = "Mang theo tấm bản đồ";
+          el.appendChild(clip);
+          at += w + 20 + ((i * 13) % 40);
+        }
+      };
+      mk("lane-voice", "voice");
+      mk("lane-sub", "subtitle");
+    </script>
+  </body>
+</html>

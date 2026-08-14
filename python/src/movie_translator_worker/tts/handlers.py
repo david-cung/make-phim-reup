@@ -26,16 +26,23 @@ is stale.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import os
+import queue
 import re
 import shutil
+import signal
+import subprocess
+import sys
+import threading
 import wave
 from pathlib import Path
 from typing import Any, Optional
 
 from .. import logging as log
 from ..errors import RpcError, RpcErrorCode
-from ..rpc import HandlerContext
+from ..rpc import HandlerContext, request_restart
 from . import registry
 from .hardware import f5_hardware_capability
 from .models import (
@@ -280,18 +287,138 @@ def _cleanup_voice(voice_dir: Path, *files: Path) -> None:
         pass
 
 
+def _python_package_root() -> Path:
+    """Directory that contains ``pyproject.toml`` (the editable worker)."""
+    env = os.environ.get("LMT_WORKER_ROOT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[3]
+
+
+def _ensure_f5_runtime(ctx: HandlerContext, progress) -> None:
+    """Install the worker ``[f5]`` extra when F5-TTS is not importable."""
+    if registry.f5_runtime_installed():
+        return
+    root = _python_package_root()
+    pyproject = root / "pyproject.toml"
+    if not pyproject.is_file():
+        raise RpcError(
+            RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
+            f"cannot install F5-TTS: worker package root {root} has no pyproject.toml",
+        )
+    progress(0.02, "installing_f5_runtime")
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        f"{root}[f5]",
+    ]
+    env = os.environ.copy()
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PYTHONUTF8"] = "1"
+    log.info("installing f5 runtime", python=sys.executable, root=str(root))
+    popen_kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "env": env,
+    }
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+    except OSError as exc:
+        raise RpcError(
+            RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
+            f"failed to start pip to install F5-TTS: {exc}",
+        ) from exc
+
+    def _kill() -> None:
+        try:
+            if sys.platform != "win32" and proc.pid:
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.kill()
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _pump() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    threading.Thread(target=_pump, daemon=True).start()
+    fraction = 0.02
+    try:
+        while True:
+            if ctx.cancelled():
+                _kill()
+                raise RpcError(RpcErrorCode.CANCELLED, "F5 runtime install cancelled")
+            try:
+                line = lines.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            text = line.strip()
+            if text:
+                log.info("f5 pip", line=text[:300])
+                fraction = min(0.12, fraction + 0.004)
+                progress(fraction, "installing_f5_runtime")
+        code = proc.wait()
+    except RpcError:
+        _kill()
+        raise
+    except Exception:
+        _kill()
+        proc.wait(timeout=10)
+        raise
+    if code != 0:
+        raise RpcError(
+            RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
+            "failed to install the F5-TTS runtime into the worker environment",
+        )
+    importlib.invalidate_caches()
+    installed = registry.f5_runtime_installed()
+    # pip replaced packages (numpy, tokenizers, ...) inside the very
+    # environment this process runs from, so half of `sys.modules` is now
+    # stale. Reusing this process poisons unrelated engines — Whisper
+    # loads have failed with `RecursionError` this way. Hand the job back
+    # and let the host respawn a clean worker.
+    request_restart("installed the F5-TTS runtime into the running environment")
+    raise RpcError(
+        RpcErrorCode.TTS_ENGINE_UNAVAILABLE,
+        "F5-TTS runtime installed. Restarting the local engine — press Download again to continue."
+        if installed
+        else "failed to install the F5-TTS runtime into the worker environment",
+        data={"recoverable": True, "restarting": True, "runtimeInstalled": installed},
+    )
+
+
 def _download_f5_model(
     preset: str,
     ctx: HandlerContext,
 ) -> dict[str, Any]:
     paths = registry.f5_model_paths(_models_root())
-    status = registry.f5_model_status(_models_root())
 
     def progress(fraction: float, stage: str) -> None:
         ctx.emit_progress(
             "tts.download_progress",
             {"fraction": max(0.0, min(1.0, fraction)), "stage": stage},
         )
+
+    _ensure_f5_runtime(ctx, progress)
+    status = registry.f5_model_status(_models_root())
 
     if status["installed"]:
         progress(1.0, "already_installed")

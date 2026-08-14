@@ -18,6 +18,7 @@ calls that never touch TTS.
 
 from __future__ import annotations
 
+import inspect
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,6 +36,19 @@ from .wav_io import (
     probe_wav,
     write_pcm16_mono,
 )
+
+
+def _synthesis_config(synthesis_config_cls: Any, length_scale: float) -> Any:
+    """Build a Piper ``SynthesisConfig`` for 1.2 (`noise_w`) and 1.6 (`noise_w_scale`)."""
+    params = inspect.signature(synthesis_config_cls).parameters
+    kwargs: dict[str, Any] = {"length_scale": float(length_scale)}
+    if "noise_scale" in params:
+        kwargs["noise_scale"] = 0.667
+    if "noise_w_scale" in params:
+        kwargs["noise_w_scale"] = 0.8
+    elif "noise_w" in params:
+        kwargs["noise_w"] = 0.8
+    return synthesis_config_cls(**kwargs)
 
 
 class PiperTTSProvider(TTSProvider):
@@ -193,7 +207,7 @@ class PiperTTSProvider(TTSProvider):
                 getattr(self._voice, "config", None), "sample_rate", info.sample_rate
             )
 
-        cfg = SynthesisConfig(length_scale=float(length_scale), noise_scale=0.667, noise_w=0.8)
+        cfg = _synthesis_config(SynthesisConfig, length_scale)
         sample_rate = int(self._voice_sample_rate or info.sample_rate)
         pcm = bytearray()
         units = split_spoken_units(text)

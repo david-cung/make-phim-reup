@@ -228,6 +228,7 @@ impl WorkerSupervisor {
             .arg("-m")
             .arg(WORKER_MODULE)
             .env("PYTHONPATH", self.cfg.worker_root.join("src"))
+            .env("LMT_WORKER_ROOT", &self.cfg.worker_root)
             .env("LMT_WORKER_LOG_LEVEL", self.cfg.log_level.to_uppercase())
             .env("LMT_DATA_DIR", &self.cfg.data_dir)
             .env("LMT_APP_VERSION", &self.cfg.app_version)
@@ -650,9 +651,10 @@ fn dispatch_notification(subscribers: &SubscriberMap, notif: &IncomingNotificati
 ///   2. `<exe>/../Resources/python-embed/bin/python3` (macOS app bundle)
 ///   3. `<exe>/python-embed/bin/python3` (Linux AppImage / Windows portable)
 ///   4. `<exe>/python-embed/python.exe` (Windows layout)
-///   5. `python3` on PATH
-///   6. `python` on PATH
-///   7. Fallback: literal `"python3"` — spawn will fail cleanly with
+///   5. `<repo>/.venv-worker/bin/python3` (dev checkout next to the worker)
+///   6. `python3` on PATH
+///   7. `python` on PATH
+///   8. Fallback: literal `"python3"` — spawn will fail cleanly with
 ///      `WORKER_PYTHON_MISSING` and the UI surfaces the install hint.
 pub fn detect_python_bin() -> PathBuf {
     if let Ok(p) = std::env::var("LMT_PYTHON") {
@@ -665,12 +667,40 @@ pub fn detect_python_bin() -> PathBuf {
             }
         }
     }
+    for candidate in local_venv_python_candidates() {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
     for name in ["python3", "python"] {
         if let Some(bin) = which_on_path(name) {
             return bin;
         }
     }
     PathBuf::from("python3")
+}
+
+/// Dev checkout: `setup.sh` installs extras (Piper, Whisper, …) into
+/// `.venv-worker` next to the `python/` worker package. Packaged apps
+/// never have this directory, so the probe is a no-op in production.
+fn local_venv_python_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let worker_root = detect_worker_root();
+    let Some(repo_root) = Path::new(&worker_root).parent() else {
+        return out;
+    };
+    out.push(repo_root.join(".venv-worker").join("bin").join("python3"));
+    out.push(repo_root.join(".venv-worker").join("bin").join("python"));
+    #[cfg(windows)]
+    {
+        out.push(
+            repo_root
+                .join(".venv-worker")
+                .join("Scripts")
+                .join("python.exe"),
+        );
+    }
+    out
 }
 
 /// Phase 12 — list every location a packaged app might have stashed a
