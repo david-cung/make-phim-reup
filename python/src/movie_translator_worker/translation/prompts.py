@@ -20,6 +20,8 @@ from typing import Iterable, Optional
 
 TRANSLATION_PROMPT_V1 = "translation_prompt_v1"
 TRANSLATION_PROMPT_V2 = "translation_prompt_v2"
+TRANSLATION_PROMPT_V3 = "translation_prompt_v3"
+TRANSLATION_PROMPT_V4 = "translation_prompt_v4"
 
 # ISO-639-1 → human name. Only entries here get pretty-printed in the
 # prompt; everything else falls back to the code itself.
@@ -27,6 +29,7 @@ _LANG_NAMES = {
     "en": "English",
     "vi": "Vietnamese",
     "zh": "Chinese",
+    "yue": "Cantonese Chinese",
     "ja": "Japanese",
     "ko": "Korean",
     "fr": "French",
@@ -176,6 +179,48 @@ def system_prompt_v2(source_lang: str, target_lang: str) -> str:
     )
 
 
+def system_prompt_v3(source_lang: str, target_lang: str) -> str:
+    src = language_name(source_lang)
+    tgt = language_name(target_lang)
+    spoken = "Vietnamese movie dialogue" if (target_lang or "").lower() == "vi" else f"spoken {tgt}"
+    extra = ""
+    if (target_lang or "").lower() == "vi":
+        extra = (
+            "\nVIETNAMESE TARGET CHECKS:\n"
+            "- Every translation MUST be Vietnamese written with Latin Vietnamese characters.\n"
+            "- Do NOT leave Chinese/Japanese/Korean characters in the translation.\n"
+            "- Translate names phonetically or keep proper names only when they are names.\n"
+            "- If unsure, still produce a natural Vietnamese line instead of copying the source.\n"
+            "- Vietnamese pronouns MUST follow explicit pronounContext relationshipRule when present.\n"
+            "- Treat speaker as the person saying the CURRENT line and addressees as people being addressed.\n"
+            "- Do NOT reverse selfReference/addressTerm direction.\n"
+            "- If speaker/addressee/relationship is unknown, prefer neutral wording, 'tôi', or omitted pronouns where natural; do not force anh/chị/em.\n"
+        )
+    return (
+        f"You are a professional movie dialogue translator working from {src} into {tgt}.\n\n"
+        "PRIORITY ORDER:\n"
+        "1. Meaning of the CURRENT line\n"
+        "2. Natural spoken " + spoken + "\n"
+        "3. Character tone and register\n"
+        "4. Surrounding PREVIOUS / NEXT lines\n"
+        "5. Conciseness that still fits a subtitle\n\n"
+        "RULES:\n"
+        "- Translate ONLY the CURRENT / CHUNK lines. Use PREVIOUS and NEXT only as context.\n"
+        "- Sound like people talking in a film, not a document.\n"
+        "- Prefer short, idiomatic spoken lines over literal word-by-word rendering.\n"
+        "- Keep names, places, and important terms.\n"
+        "- Match formality, intimacy, and profanity of the source.\n"
+        "- Do not add explanations, honorifics, or translator notes.\n"
+        "- Never copy the source line as the translation unless the source is already in the target language.\n"
+        "- Keep each line short enough to speak in the same time as the original.\n"
+        f"{extra}\n"
+        "OUTPUT FORMAT:\n"
+        "Return a single JSON object:\n"
+        '{ "translations": [ { "id": <int>, "translated_text": "<spoken subtitle>", "confidence": 0.0-1.0, "reason_flags": [] } ] }\n'
+        "No Markdown, no code fences, no extra prose."
+    )
+
+
 def user_prompt_v2(
     *,
     source_lang: str,
@@ -208,6 +253,95 @@ def user_prompt_v2(
     )
 
 
+def user_prompt_v3(
+    *,
+    source_lang: str,
+    target_lang: str,
+    context_before: Iterable[dict],
+    chunk: Iterable[dict],
+    context_after: Iterable[dict],
+    hint: Optional[str] = None,
+    translation_memory: Optional[dict] = None,
+) -> str:
+    src = language_name(source_lang)
+    tgt = language_name(target_lang)
+    before = json.dumps(
+        list(context_before), ensure_ascii=False, separators=(",", ":")
+    )
+    now = json.dumps(list(chunk), ensure_ascii=False, separators=(",", ":"))
+    after = json.dumps(
+        list(context_after), ensure_ascii=False, separators=(",", ":")
+    )
+    memory = json.dumps(
+        translation_memory or {}, ensure_ascii=False, separators=(",", ":")
+    )
+    hint_line = f"\nNOTE:\n{hint}\n" if hint else ""
+    guard = ""
+    if (target_lang or "").lower() == "vi":
+        guard = (
+            "\nIMPORTANT: Output Vietnamese only. If any CURRENT line is Chinese, "
+            "translate it to Vietnamese; do not copy Chinese characters into the answer.\n"
+        )
+    return (
+        f"Translate movie dialogue from {src} into natural spoken {tgt}.\n"
+        f"{guard}"
+        f"{hint_line}\n"
+        "Each row may include pronounContext with speaker, addressees, relationshipRule, and reviewFlags.\n"
+        "Rows may include automaticPronounPlan with speaker, listener, relationship, self_pronoun, target_pronoun, confidence, enforce, and context_request.\n"
+        "When automaticPronounPlan.enforce is true, treat self_pronoun and target_pronoun as strong constraints for the CURRENT speaker's line.\n"
+        "When automaticPronounPlan.context_request is true, use broader dialogue context and avoid hard-coding a risky pronoun; omit pronouns naturally if needed.\n"
+        "Rows may also include speakerId such as speaker_001/speaker_002. Use speakerId only as a stable dialogue turn label; do not infer real names, gender, or relationships from it.\n"
+        "TRANSLATION_MEMORY may include movieSummary, currentScenes, characters, relationships, sceneRelationshipOverrides, pronounPlans, speakerCharacterMapping, knownNames, and previous translationMemory rows. Use it only to keep names, aliases, speaker continuity, scene meaning, and pronouns consistent.\n"
+        "Character and relationship memory is uncertain unless confidence is high. Do not invent gender, relationships, or real character names that are not present in the memory or dialogue.\n"
+        "Priority for Vietnamese pronouns: explicit relationshipRule, high-confidence automaticPronounPlan, scene relationship overrides, character defaults, confirmed context, dialogue context, then model inference last.\n"
+        "For a relationshipRule, selfReference is what the CURRENT speaker calls themselves; addressTerm is what the CURRENT speaker calls the addressee.\n"
+        "Never swap speaker and addressee pronouns.\n\n"
+        "Use TRANSLATION_MEMORY to keep names, terms, scene context, and nearby pronoun patterns consistent. Do not translate memory rows again.\n\n"
+        "TRANSLATION_MEMORY:\n"
+        f"{memory}\n\n"
+        "PREVIOUS:\n"
+        f"{before}\n\n"
+        "CURRENT (translate these):\n"
+        f"{now}\n\n"
+        "NEXT:\n"
+        f"{after}\n\n"
+        f'Return JSON in {tgt}: {{ "translations": [ {{"id": ..., "translated_text": "...", "confidence": 0.0, "reason_flags": []}} ] }}'
+    )
+
+
+def system_prompt_v4(source_lang: str, target_lang: str) -> str:
+    return system_prompt_v3(source_lang, target_lang)
+
+
+def user_prompt_v4(
+    *,
+    source_lang: str,
+    target_lang: str,
+    context_before: Iterable[dict],
+    chunk: Iterable[dict],
+    context_after: Iterable[dict],
+    hint: Optional[str] = None,
+    translation_memory: Optional[dict] = None,
+) -> str:
+    retry_note = ""
+    if hint:
+        retry_note = (
+            "\nRETRY_OR_VALIDATION_NOTE:\n"
+            f"{hint}\n"
+            "Re-evaluate the CURRENT dialogue using the expanded conversation context. "
+            "Pay attention to omitted subjects, pronouns, forms of address, speaker intent, and who is being addressed.\n"
+        )
+    return user_prompt_v3(
+        source_lang=source_lang,
+        target_lang=target_lang,
+        context_before=context_before,
+        chunk=chunk,
+        context_after=context_after,
+        hint=retry_note or None,
+        translation_memory=translation_memory,
+    )
+
+
 def render_chunk_messages(
     *,
     prompt_version: str,
@@ -217,6 +351,7 @@ def render_chunk_messages(
     chunk: Iterable[dict],
     context_after: Iterable[dict],
     hint: Optional[str] = None,
+    translation_memory: Optional[dict] = None,
 ) -> list[PromptMessage]:
     if prompt_version == TRANSLATION_PROMPT_V2:
         return [
@@ -233,6 +368,38 @@ def render_chunk_messages(
                 ),
             ),
         ]
+    if prompt_version == TRANSLATION_PROMPT_V3:
+        return [
+            PromptMessage("system", system_prompt_v3(source_lang, target_lang)),
+            PromptMessage(
+                "user",
+                user_prompt_v3(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    context_before=context_before,
+                    chunk=chunk,
+                    context_after=context_after,
+                    hint=hint,
+                    translation_memory=translation_memory,
+                ),
+            ),
+        ]
+    if prompt_version == TRANSLATION_PROMPT_V4:
+        return [
+            PromptMessage("system", system_prompt_v4(source_lang, target_lang)),
+            PromptMessage(
+                "user",
+                user_prompt_v4(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    context_before=context_before,
+                    chunk=chunk,
+                    context_after=context_after,
+                    hint=hint,
+                    translation_memory=translation_memory,
+                ),
+            ),
+        ]
     return render_chunk_messages_v1(
         source_lang=source_lang,
         target_lang=target_lang,
@@ -244,7 +411,12 @@ def render_chunk_messages(
 
 
 def prompt_versions() -> list[str]:
-    return [TRANSLATION_PROMPT_V1, TRANSLATION_PROMPT_V2]
+    return [
+        TRANSLATION_PROMPT_V1,
+        TRANSLATION_PROMPT_V2,
+        TRANSLATION_PROMPT_V3,
+        TRANSLATION_PROMPT_V4,
+    ]
 
 
 def is_known_version(name: str) -> bool:

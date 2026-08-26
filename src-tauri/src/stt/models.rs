@@ -116,6 +116,10 @@ pub struct TranscribeSegment {
     pub start: f64,
     pub end: f64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_confidence: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_logprob: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,6 +154,8 @@ pub struct Transcript {
     pub provider: String,
     #[serde(default)]
     pub options: serde_json::Value,
+    #[serde(default)]
+    pub speaker_memory: serde_json::Value,
 }
 
 fn default_provider() -> String {

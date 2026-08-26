@@ -58,7 +58,12 @@ pub fn derive_from_sources(
                     })
                     .collect()
             }),
-            speaker: None,
+            speaker: t
+                .speaker_id
+                .as_ref()
+                .filter(|speaker| !speaker.trim().is_empty())
+                .cloned(),
+            speaker_confidence: t.speaker_confidence,
             voice_id: None,
         })
         .collect();
@@ -118,6 +123,9 @@ pub fn merge_preserving_edits(fresh: SubtitleDoc, previous: Option<&SubtitleDoc>
         // whenever they carry information.
         if prev_seg.speaker.is_some() {
             seg.speaker = prev_seg.speaker.clone();
+        }
+        if prev_seg.speaker_confidence.is_some() {
+            seg.speaker_confidence = prev_seg.speaker_confidence;
         }
         if prev_seg.voice_id.is_some() {
             seg.voice_id = prev_seg.voice_id.clone();

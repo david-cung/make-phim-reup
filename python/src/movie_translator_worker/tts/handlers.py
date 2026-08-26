@@ -47,6 +47,7 @@ from . import registry
 from .hardware import f5_hardware_capability
 from .models import (
     BatchSegment,
+    SynthesisResult,
     TTSSettings,
     build_segment_cache_key,
     text_hash,
@@ -56,6 +57,7 @@ from .prosody import shorten_for_duration
 from .manager import TTSManager
 from .provider import ProviderCancelled, ProviderError, TTSProvider
 from .text_normalization import normalize_tts_text
+from .wav_io import write_pcm16_mono
 
 _MODELS_ROOT: Optional[Path] = None
 _MANAGER: Optional[TTSManager] = None
@@ -974,6 +976,8 @@ def _synthesize_fitting(
     2. apply a small speed increase (≤ 1.12×)
     3. stop — never ram the voice to fit at any cost
     """
+    if not _has_speakable_text(text):
+        return _write_silence_result(output_path, target_duration)
     result = provider.synthesize(text, voice_id, output_path, settings)
     target = None
     if isinstance(target_duration, (int, float)) and float(target_duration) > 0.2:
@@ -995,6 +999,30 @@ def _synthesize_fitting(
     if spoken != text or abs(next_settings.speed - settings.speed) > 1e-3:
         result = provider.synthesize(spoken, voice_id, output_path, next_settings)
     return result
+
+
+_SPEAKABLE_RE = re.compile(r"[\wÀ-ỹ]", re.UNICODE)
+
+
+def _has_speakable_text(text: str) -> bool:
+    return bool(_SPEAKABLE_RE.search(text or ""))
+
+
+def _write_silence_result(output_path: str, target_duration: Any) -> SynthesisResult:
+    sample_rate = 22050
+    duration = 0.35
+    if isinstance(target_duration, (int, float)) and float(target_duration) > 0:
+        duration = max(0.10, min(float(target_duration), 30.0))
+    sample_count = max(1, int(sample_rate * duration))
+    write_pcm16_mono(output_path, b"\x00\x00" * sample_count, sample_rate=sample_rate)
+    size = Path(output_path).stat().st_size if Path(output_path).is_file() else 0
+    return SynthesisResult(
+        file_path=output_path,
+        duration_secs=sample_count / sample_rate,
+        sample_rate=sample_rate,
+        channels=1,
+        size_bytes=size,
+    )
 
 
 def _require_str(params: dict[str, Any], key: str) -> str:

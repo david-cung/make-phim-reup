@@ -35,6 +35,8 @@ class Segment:
     avg_logprob: Optional[float] = None
     no_speech_prob: Optional[float] = None
     words: Optional[list[Word]] = None
+    speaker_id: Optional[str] = None
+    speaker_confidence: Optional[float] = None
 
 
 @dataclass
@@ -84,6 +86,7 @@ class Transcript:
     created_at: str
     provider: str = "faster-whisper"
     options: dict[str, Any] = field(default_factory=dict)
+    speaker_memory: dict[str, Any] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------- codec
@@ -107,6 +110,7 @@ def transcript_to_dict(t: Transcript) -> dict[str, Any]:
         "createdAt": t.created_at,
         "provider": t.provider,
         "options": t.options,
+        "speakerMemory": t.speaker_memory,
     }
 
 
@@ -142,6 +146,7 @@ def transcript_from_dict(payload: dict[str, Any]) -> Transcript:
         created_at=str(payload.get("createdAt") or ""),
         provider=str(payload.get("provider") or "faster-whisper"),
         options=dict(payload.get("options") or {}),
+        speaker_memory=dict(payload.get("speakerMemory") or {}),
     )
 
 
@@ -221,6 +226,10 @@ def _segment_to_dict(s: Segment) -> dict[str, Any]:
         d["avgLogprob"] = s.avg_logprob
     if s.no_speech_prob is not None:
         d["noSpeechProb"] = s.no_speech_prob
+    if s.speaker_id:
+        d["speakerId"] = s.speaker_id
+    if s.speaker_confidence is not None:
+        d["speakerConfidence"] = round(float(s.speaker_confidence), 4)
     if s.words:
         d["words"] = [_word_to_dict(w) for w in s.words]
     return d
@@ -240,6 +249,12 @@ def _segment_from_dict(payload: Any) -> Segment:
             avg_logprob=_opt_float(payload.get("avgLogprob")),
             no_speech_prob=_opt_float(payload.get("noSpeechProb")),
             words=words,
+            speaker_id=(
+                str(payload.get("speakerId"))
+                if payload.get("speakerId") is not None
+                else None
+            ),
+            speaker_confidence=_opt_float(payload.get("speakerConfidence")),
         )
     except KeyError as e:
         raise ValueError(f"segment missing required field: {e}") from e

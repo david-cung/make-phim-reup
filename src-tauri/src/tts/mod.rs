@@ -11,6 +11,7 @@
 //! narrow ``VoiceInfo``/``TtsSummary`` surface to the frontend.
 
 pub mod cache;
+pub mod automation;
 pub mod errors;
 pub mod models;
 pub mod service;
@@ -22,6 +23,7 @@ pub use errors::TtsError;
 pub use models::{
     build_segment_cache_key, text_hash, CreateVoiceProfileRequest, GenerateMode, GenerateRequest,
     PreviewResult, RecommendedVoicePreset, TtsDevice, TtsEngineInfo, TtsEnv, TtsGenerateStart,
-    TtsManifest, TtsSegmentEntry, TtsSettings, TtsSummary, VoiceInfo, TTS_CACHE_SCHEMA_VERSION,
+    TtsManifest, TtsSegmentEntry, TtsSettings, TtsSummary, VoiceInfo, VoiceProfile,
+    TTS_CACHE_SCHEMA_VERSION,
 };
 pub use service::TtsService;

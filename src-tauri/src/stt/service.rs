@@ -712,6 +712,10 @@ fn parse_transcribe_response(
         end: f64,
         text: String,
         #[serde(default)]
+        speaker_id: Option<String>,
+        #[serde(default)]
+        speaker_confidence: Option<f64>,
+        #[serde(default)]
         avg_logprob: Option<f64>,
         #[serde(default)]
         no_speech_prob: Option<f64>,
@@ -744,6 +748,8 @@ fn parse_transcribe_response(
         word_timestamps: Option<bool>,
         #[serde(default)]
         options: Option<Value>,
+        #[serde(default)]
+        speaker_memory: Option<Value>,
     }
     let wire: WireResp = serde_json::from_value(value)?;
     let segments = wire
@@ -754,6 +760,8 @@ fn parse_transcribe_response(
             start: s.start,
             end: s.end,
             text: s.text,
+            speaker_id: s.speaker_id,
+            speaker_confidence: s.speaker_confidence,
             avg_logprob: s.avg_logprob,
             no_speech_prob: s.no_speech_prob,
             words: s.words.map(|words| {
@@ -792,6 +800,7 @@ fn parse_transcribe_response(
         created_at: Utc::now(),
         provider: "faster-whisper".into(),
         options: wire.options.unwrap_or_else(|| json!({})),
+        speaker_memory: wire.speaker_memory.unwrap_or_else(|| json!({})),
     })
 }
 

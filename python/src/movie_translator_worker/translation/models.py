@@ -12,6 +12,44 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 TRANSLATION_SCHEMA_VERSION = 1
+DEFAULT_TRANSLATION_BATCH_SIZE = 15
+DEFAULT_CONTEXT_PREVIOUS_SEGMENTS = 5
+DEFAULT_CONTEXT_NEXT_SEGMENTS = 5
+DEFAULT_RETRY_CONTEXT_PREVIOUS_SEGMENTS = 12
+DEFAULT_RETRY_CONTEXT_NEXT_SEGMENTS = 12
+DEFAULT_MAX_TRANSLATION_RETRIES = 2
+DEFAULT_LOW_CONFIDENCE_THRESHOLD = 0.80
+
+
+@dataclass(frozen=True)
+class TranslationMetadata:
+    confidence: Optional[float] = None
+    needs_review: bool = False
+    retry_count: int = 0
+    translation_method: Optional[str] = None
+    reason_flags: list[str] = field(default_factory=list)
+    validation: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "confidence": self.confidence,
+            "needsReview": bool(self.needs_review),
+            "retryCount": int(self.retry_count),
+            "translationMethod": self.translation_method,
+            "reasonFlags": list(self.reason_flags),
+            "validation": dict(self.validation),
+        }
+
+
+@dataclass(frozen=True)
+class TranslationResult:
+    translation: str
+    metadata: TranslationMetadata = field(default_factory=TranslationMetadata)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.translation == other
+        return super().__eq__(other)
 
 
 @dataclass(frozen=True)
@@ -32,6 +70,10 @@ class TranslatedSegment:
     end: float
     edited: bool = False
     dubbing: str = ""
+    pronoun_context: dict[str, Any] = field(default_factory=dict)
+    metadata: TranslationMetadata = field(default_factory=TranslationMetadata)
+    speaker_id: Optional[str] = None
+    speaker_confidence: Optional[float] = None
 
 
 @dataclass
@@ -48,6 +90,7 @@ class TranslationChunk:
     segment_ids: list[int]
     context_before_ids: list[int] = field(default_factory=list)
     context_after_ids: list[int] = field(default_factory=list)
+    all_segment_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -60,10 +103,14 @@ class TranslateOptions:
     model: str
     source_language: str = "en"
     target_language: str = "vi"
-    prompt_version: str = "translation_prompt_v2"
-    chunk_size: int = 10
-    context_before: int = 2
-    context_after: int = 2
+    prompt_version: str = "translation_prompt_v4"
+    chunk_size: int = DEFAULT_TRANSLATION_BATCH_SIZE
+    context_before: int = DEFAULT_CONTEXT_PREVIOUS_SEGMENTS
+    context_after: int = DEFAULT_CONTEXT_NEXT_SEGMENTS
+    retry_context_before: int = DEFAULT_RETRY_CONTEXT_PREVIOUS_SEGMENTS
+    retry_context_after: int = DEFAULT_RETRY_CONTEXT_NEXT_SEGMENTS
+    max_translation_retries: int = DEFAULT_MAX_TRANSLATION_RETRIES
+    low_confidence_threshold: float = DEFAULT_LOW_CONFIDENCE_THRESHOLD
     temperature: float = 0.2
     top_p: float = 0.95
     max_tokens: int = 2048
@@ -73,10 +120,16 @@ class TranslateOptions:
             model=self.model,
             source_language=(self.source_language or "").lower() or "en",
             target_language=(self.target_language or "").lower() or "vi",
-            prompt_version=self.prompt_version or "translation_prompt_v2",
+            prompt_version=self.prompt_version or "translation_prompt_v4",
             chunk_size=max(1, int(self.chunk_size)),
             context_before=max(0, int(self.context_before)),
             context_after=max(0, int(self.context_after)),
+            retry_context_before=max(0, int(self.retry_context_before)),
+            retry_context_after=max(0, int(self.retry_context_after)),
+            max_translation_retries=max(0, int(self.max_translation_retries)),
+            low_confidence_threshold=min(
+                1.0, max(0.0, float(self.low_confidence_threshold))
+            ),
             temperature=float(self.temperature),
             top_p=float(self.top_p),
             max_tokens=max(64, int(self.max_tokens)),
@@ -208,6 +261,10 @@ def build_cache_key(
         f"chunk={opts.chunk_size}",
         f"before={opts.context_before}",
         f"after={opts.context_after}",
+        f"retry_before={opts.retry_context_before}",
+        f"retry_after={opts.retry_context_after}",
+        f"max_retries={opts.max_translation_retries}",
+        f"low_conf={opts.low_confidence_threshold:.4f}",
         f"temp={opts.temperature:.4f}",
         f"top_p={opts.top_p:.4f}",
         f"max_tokens={opts.max_tokens}",
@@ -251,6 +308,50 @@ def chunk_segments(
                 segment_ids=list(window),
                 context_before_ids=list(before),
                 context_after_ids=list(after),
+                all_segment_ids=list(segment_ids),
+            )
+        )
+        idx += 1
+    return chunks
+
+
+def chunk_segments_with_context(
+    ordered_ids: list[int],
+    todo_ids: list[int],
+    *,
+    chunk_size: int,
+    context_before: int,
+    context_after: int,
+) -> list[TranslationChunk]:
+    """Create work chunks from ``todo_ids`` while taking context from
+    the full movie order.
+
+    This preserves resume behaviour: already translated segments are not
+    translated again, but they can still appear in PREVIOUS/NEXT context.
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if not todo_ids:
+        return []
+    order_index = {sid: i for i, sid in enumerate(ordered_ids)}
+    chunks: list[TranslationChunk] = []
+    idx = 0
+    for start in range(0, len(todo_ids), chunk_size):
+        window = list(todo_ids[start : start + chunk_size])
+        positions = [order_index[sid] for sid in window if sid in order_index]
+        if not positions:
+            continue
+        first = min(positions)
+        last = max(positions)
+        before = ordered_ids[max(0, first - context_before) : first]
+        after = ordered_ids[last + 1 : last + 1 + context_after]
+        chunks.append(
+            TranslationChunk(
+                chunk_index=idx,
+                segment_ids=window,
+                context_before_ids=list(before),
+                context_after_ids=list(after),
+                all_segment_ids=list(ordered_ids),
             )
         )
         idx += 1
@@ -259,7 +360,7 @@ def chunk_segments(
 
 def merge_translations(
     base: list[TranslatedSegment],
-    updates: dict[int, str],
+    updates: dict[int, str | TranslationResult],
     *,
     mark_edited: bool = False,
 ) -> list[TranslatedSegment]:
@@ -273,7 +374,9 @@ def merge_translations(
     out: list[TranslatedSegment] = []
     for seg in base:
         if seg.id in updates:
-            new_text = updates[seg.id]
+            update = updates[seg.id]
+            result = ensure_translation_result(update)
+            new_text = result.translation
             custom_dubbing = (
                 bool(seg.dubbing.strip())
                 and seg.dubbing.strip() != seg.translation.strip()
@@ -287,6 +390,10 @@ def merge_translations(
                     end=seg.end,
                     edited=True if mark_edited else seg.edited,
                     dubbing=seg.dubbing if custom_dubbing else new_text,
+                    pronoun_context=seg.pronoun_context,
+                    metadata=result.metadata,
+                    speaker_id=seg.speaker_id,
+                    speaker_confidence=seg.speaker_confidence,
                 )
             )
         else:
@@ -309,6 +416,7 @@ def _segment_to_dict(s: TranslatedSegment) -> dict[str, Any]:
         "start": round(s.start, 3),
         "end": round(s.end, 3),
         "edited": bool(s.edited),
+        "translationMetadata": s.metadata.to_dict(),
     }
 
 
@@ -325,6 +433,14 @@ def _segment_from_dict(payload: Any) -> TranslatedSegment:
             end=float(payload.get("end", 0.0)),
             edited=bool(payload.get("edited", False)),
             dubbing=str(payload.get("dubbing", "") or translation),
+            pronoun_context=dict(payload.get("pronounContext") or {}),
+            metadata=_metadata_from_dict(payload.get("translationMetadata")),
+            speaker_id=(
+                str(payload.get("speakerId"))
+                if payload.get("speakerId") is not None
+                else None
+            ),
+            speaker_confidence=_opt_float(payload.get("speakerConfidence")),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError(f"invalid translated segment: {e}") from e
@@ -338,6 +454,48 @@ def missing_ids(doc_segments: list[TranslatedSegment]) -> list[int]:
     translation string). Used by the service to resume partial work.
     """
     return [s.id for s in doc_segments if not s.translation.strip() and not s.edited]
+
+
+def ensure_translation_result(value: str | TranslationResult) -> TranslationResult:
+    if isinstance(value, TranslationResult):
+        return value
+    return TranslationResult(str(value))
+
+
+def _metadata_from_dict(payload: Any) -> TranslationMetadata:
+    if not isinstance(payload, dict):
+        return TranslationMetadata()
+    confidence = payload.get("confidence")
+    try:
+        parsed_confidence = float(confidence) if confidence is not None else None
+    except (TypeError, ValueError):
+        parsed_confidence = None
+    flags = payload.get("reasonFlags") or payload.get("reason_flags") or []
+    if not isinstance(flags, list):
+        flags = []
+    return TranslationMetadata(
+        confidence=parsed_confidence,
+        needs_review=bool(payload.get("needsReview") or payload.get("needs_review")),
+        retry_count=int(payload.get("retryCount") or payload.get("retry_count") or 0),
+        translation_method=(
+            str(payload.get("translationMethod") or payload.get("translation_method"))
+            if payload.get("translationMethod") or payload.get("translation_method")
+            else None
+        ),
+        reason_flags=[str(flag) for flag in flags if str(flag).strip()],
+        validation=dict(payload.get("validation") or {})
+        if isinstance(payload.get("validation"), dict)
+        else {},
+    )
+
+
+def _opt_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def unique_language(lang: Optional[str], fallback: str) -> str:

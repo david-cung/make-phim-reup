@@ -154,7 +154,8 @@ def test_transcribe_end_to_end_emits_progress_and_result(
     assert len(responses) == 1
     result = responses[0]["result"]
     assert result["language"] == "en"
-    assert len(result["segments"]) == 3
+    assert len(result["segments"]) == 1
+    assert result["segments"][0]["text"] == "seg-0 seg-1 seg-2"
     assert result["cacheKey"].startswith("sha256:")
 
 

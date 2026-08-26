@@ -34,7 +34,11 @@ use uuid::Uuid;
 use crate::db::DbHandle;
 use crate::jobs::{JobProgressEvent, JobRegistry, JobSnapshot, JobStage, JobStatus, JobsRepo};
 use crate::projects::ProjectService;
+use crate::pronouns::{
+    context_to_wire, obvious_pronoun_flags, segment_contexts, upsert_review_flag, PronounCacheFile,
+};
 use crate::stt::TranscriptCacheFile;
+use crate::subtitles::SubtitleCacheFile;
 use crate::worker::WorkerSupervisor;
 
 use super::cache::{
@@ -247,10 +251,7 @@ impl TranslationService {
         result: Result<Value, crate::worker::WorkerError>,
     ) {
         match result {
-            Ok(_) => {
-                self.finalize_success(job_id, "", JobStage::Translate)
-                    .await
-            }
+            Ok(_) => self.finalize_success(job_id, "", JobStage::Translate).await,
             Err(err) => match err {
                 crate::worker::WorkerError::Rpc(rpc) => {
                     let t_err = TranslationError::from_rpc(rpc);
@@ -457,16 +458,29 @@ impl TranslationService {
             }
         })?;
 
+        let pronoun_doc = PronounCacheFile::load(&project_root).unwrap_or_else(|err| {
+            tracing::warn!(%err, "failed to load pronoun context; translating without it");
+            crate::pronouns::PronounContextDoc::empty()
+        });
+        let subtitle_doc = SubtitleCacheFile::load(&project_root).ok().flatten();
+        let pronoun_contexts = segment_contexts(&pronoun_doc, subtitle_doc.as_ref());
+
         // Build the request payload for the worker.
         let segments_wire = transcript
             .segments
             .iter()
             .map(|s| {
+                let pronoun_context = pronoun_contexts
+                    .get(&s.id)
+                    .map(|ctx| context_to_wire(ctx, &pronoun_doc));
                 json!({
                     "id": s.id,
                     "text": s.text,
                     "start": s.start,
                     "end": s.end,
+                    "speakerId": s.speaker_id,
+                    "speakerConfidence": s.speaker_confidence,
+                    "pronounContext": pronoun_context,
                 })
             })
             .collect::<Vec<_>>();
@@ -565,6 +579,8 @@ impl TranslationService {
         // renders live.
         let doc_lock = self.doc_lock.clone();
         let project_root_for_chunks = project_root.clone();
+        let pronoun_doc_for_chunks = pronoun_doc.clone();
+        let pronoun_contexts_for_chunks = pronoun_contexts.clone();
         let app_for_chunks = self.app.clone();
         let job_for_chunks = job_id.clone();
         let project_for_chunks = project_id.clone();
@@ -578,7 +594,7 @@ impl TranslationService {
                 if target != request_id_for_chunks {
                     return;
                 }
-                let updates: Vec<(u32, String)> = params
+                let updates: Vec<(u32, String, serde_json::Value)> = params
                     .get("translations")
                     .and_then(|v| v.as_array())
                     .map(|arr| {
@@ -587,7 +603,11 @@ impl TranslationService {
                                 let id = item.get("id").and_then(|v| v.as_u64())? as u32;
                                 let t =
                                     item.get("translation").and_then(|v| v.as_str())?.to_string();
-                                Some((id, t))
+                                let metadata = item
+                                    .get("metadata")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                Some((id, t, metadata))
                             })
                             .collect()
                     })
@@ -600,6 +620,8 @@ impl TranslationService {
                 let job_id = job_for_chunks.clone();
                 let project_id = project_for_chunks.clone();
                 let doc_lock = doc_lock.clone();
+                let pronoun_doc = pronoun_doc_for_chunks.clone();
+                let pronoun_contexts = pronoun_contexts_for_chunks.clone();
                 tokio::spawn(async move {
                     let _guard = doc_lock.lock();
                     let doc = match TranslationCacheFile::load(&root) {
@@ -620,6 +642,16 @@ impl TranslationService {
                         tracing::warn!(%err, "failed to persist chunk update");
                         return;
                     }
+                    let pronoun_updates = updates
+                        .iter()
+                        .map(|(id, text, _)| (*id, text.clone()))
+                        .collect::<Vec<_>>();
+                    persist_pronoun_review_flags(
+                        &root,
+                        &pronoun_doc,
+                        &pronoun_contexts,
+                        &pronoun_updates,
+                    );
                     // Nudge the frontend so the editor can re-fetch.
                     let payload = json!({
                         "jobId": job_id,
@@ -876,6 +908,10 @@ pub fn build_cache_key(
         format!("chunk={}", options.chunk_size),
         format!("before={}", options.context_before),
         format!("after={}", options.context_after),
+        format!("retry_before={}", options.retry_context_before),
+        format!("retry_after={}", options.retry_context_after),
+        format!("max_retries={}", options.max_translation_retries),
+        format!("low_conf={:.4}", options.low_confidence_threshold),
         format!("temp={:.4}", options.temperature),
         format!("top_p={:.4}", options.top_p),
         format!("max_tokens={}", options.max_tokens),
@@ -893,10 +929,46 @@ fn options_to_wire(options: &TranslateOptions) -> Value {
         "chunkSize": options.chunk_size,
         "contextBefore": options.context_before,
         "contextAfter": options.context_after,
+        "retryContextBefore": options.retry_context_before,
+        "retryContextAfter": options.retry_context_after,
+        "maxTranslationRetries": options.max_translation_retries,
+        "lowConfidenceThreshold": options.low_confidence_threshold,
         "temperature": options.temperature,
         "topP": options.top_p,
         "maxTokens": options.max_tokens,
     })
+}
+
+fn persist_pronoun_review_flags(
+    project_root: &std::path::Path,
+    base_doc: &crate::pronouns::PronounContextDoc,
+    contexts: &std::collections::BTreeMap<u32, crate::pronouns::SegmentPronounContext>,
+    updates: &[(u32, String)],
+) {
+    let mut doc = match PronounCacheFile::load(project_root) {
+        Ok(existing) => existing,
+        Err(_) => base_doc.clone(),
+    };
+    let mut changed = false;
+    for (segment_id, text) in updates {
+        let Some(ctx) = contexts.get(segment_id) else {
+            continue;
+        };
+        let mut flags = ctx.flags.clone();
+        if let Some(rule) = ctx.rule.as_ref() {
+            flags.extend(obvious_pronoun_flags(text, rule));
+        }
+        if flags.is_empty() {
+            continue;
+        }
+        upsert_review_flag(&mut doc, *segment_id, flags, Some(ctx));
+        changed = true;
+    }
+    if changed {
+        if let Err(err) = PronounCacheFile::save(project_root, &doc) {
+            tracing::warn!(%err, "failed to persist pronoun review flags");
+        }
+    }
 }
 
 fn build_or_reuse_doc(

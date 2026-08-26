@@ -18,8 +18,8 @@ pub mod config;
 pub mod db;
 pub mod errors;
 pub mod ffmpeg;
-pub mod ipc;
 pub mod integrations;
+pub mod ipc;
 pub mod jobs;
 pub mod logging;
 pub mod media;
@@ -28,6 +28,7 @@ pub mod mix;
 pub mod models;
 pub mod paths;
 pub mod projects;
+pub mod pronouns;
 pub mod render;
 pub mod stt;
 pub mod subtitles;
@@ -108,6 +109,7 @@ pub fn run() {
             commands::get_project_media,
             commands::extract_audio,
             commands::cancel_job,
+            commands::get_job,
             commands::list_active_jobs,
             // Phase 3
             commands::get_stt_env,
@@ -124,6 +126,8 @@ pub fn run() {
             commands::get_project_translation,
             commands::get_project_translation_doc,
             commands::update_translation_segment,
+            commands::get_project_pronoun_context,
+            commands::save_project_pronoun_context,
             // Phase 5
             commands::get_project_subtitles,
             commands::get_project_subtitles_doc,

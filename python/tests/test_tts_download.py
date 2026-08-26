@@ -39,7 +39,7 @@ def test_recommended_voices_shape_matches_rust() -> None:
     presets = registry.recommended_voices()
     assert presets, "must ship at least one preset"
     for p in presets:
-        assert set(p.keys()) == {
+        assert {
             "preset",
             "engine",
             "voiceId",
@@ -49,11 +49,11 @@ def test_recommended_voices_shape_matches_rust() -> None:
             "approxSizeBytes",
             "label",
             "isDefault",
-        }
+        }.issubset(set(p.keys()))
         assert isinstance(p["approxSizeBytes"], int)
         assert isinstance(p["isDefault"], bool)
         assert isinstance(p["targetLanguages"], list)
-        assert p["engine"] == "piper", "only Piper is wired up for auto-download today"
+        assert p["engine"] in {"piper", registry.F5_ENGINE}
 
 
 def test_exactly_one_default_recommended_voice() -> None:

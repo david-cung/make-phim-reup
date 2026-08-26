@@ -6,9 +6,13 @@ use chrono::Utc;
 use crate::subtitles::models::DerivedFrom;
 use crate::subtitles::{DirtyFlags, SubtitleDoc, SubtitleSegment};
 
+use super::automation::{
+    assign_voice_profiles, dubbing_script_for_segment, effective_settings_for_segment,
+    prepare_automatic_dubbing, resolve_fallback_voice_id,
+};
 use super::models::{
     build_segment_cache_key, text_hash, GenerateMode, GenerateRequest, TtsManifest,
-    TtsSegmentEntry, TtsSettings,
+    TtsSegmentEntry, TtsSettings, VoiceInfo,
 };
 use super::service::{build_summary, SummaryRequest};
 
@@ -22,6 +26,7 @@ fn seg(id: u32, src: &str, translated: &str, voice: Option<&str>) -> SubtitleSeg
         dubbing_text: translated.into(),
         words: None,
         speaker: None,
+        speaker_confidence: None,
         voice_id: voice.map(str::to_string),
     }
 }
@@ -39,6 +44,32 @@ fn doc(segments: Vec<SubtitleSegment>) -> SubtitleDoc {
         next_id,
         created_at: now,
         updated_at: now,
+    }
+}
+
+fn voice(id: &str, gender: &str) -> VoiceInfo {
+    VoiceInfo {
+        id: id.into(),
+        name: id.into(),
+        language: "vi".into(),
+        gender: gender.into(),
+        engine: "piper".into(),
+        model_path: format!("/models/{id}.onnx"),
+        config_path: None,
+        sample_rate: 22050,
+        installed: true,
+        quality: Some("medium".into()),
+        supported_settings: vec!["speed".into(), "volume".into()],
+        reference_audio_path: None,
+        reference_text: None,
+        model_name: Some(format!("{id}.onnx")),
+        model_version: None,
+        model_source: None,
+        license: None,
+        commercial_use: None,
+        cache_identity: None,
+        emotion: None,
+        style: None,
     }
 }
 
@@ -202,4 +233,74 @@ fn generate_mode_default_is_missing() {
     })
     .unwrap();
     assert_eq!(v["mode"]["kind"], "missing");
+}
+
+#[test]
+fn automatic_voice_assignment_is_consistent_per_speaker() {
+    let mut a1 = seg(1, "a", "Xin chào", None);
+    let mut b = seg(2, "b", "Tôi đây", None);
+    let mut a2 = seg(3, "c", "Tạm biệt", None);
+    a1.speaker = Some("speaker_001".into());
+    b.speaker = Some("speaker_002".into());
+    a2.speaker = Some("speaker_001".into());
+    let d = doc(vec![a1, b, a2]);
+    let voices = vec![voice("vi_male_01", "male"), voice("vi_female_01", "female")];
+
+    let prepared = prepare_automatic_dubbing(
+        &d,
+        &voices,
+        "piper",
+        "vi_male_01",
+    );
+
+    assert!(prepared.changed);
+    assert_eq!(prepared.doc.segments[0].voice_id, prepared.doc.segments[2].voice_id);
+    assert_ne!(prepared.doc.segments[0].voice_id, prepared.doc.segments[1].voice_id);
+    assert_eq!(prepared.voice_profiles.len(), 2);
+}
+
+#[test]
+fn fallback_voice_is_used_when_character_information_is_uncertain() {
+    let d = doc(vec![seg(1, "a", "Xin chào", None)]);
+    let voices = vec![voice("vi_neutral_01", "neutral")];
+
+    let profiles = assign_voice_profiles(&d, &voices, "piper", "");
+
+    assert_eq!(resolve_fallback_voice_id(&voices, "piper", ""), "vi_neutral_01");
+    assert_eq!(profiles[0].voice_id, "vi_neutral_01");
+    assert_eq!(profiles[0].character_id, "character_speaker_unknown");
+}
+
+#[test]
+fn dubbing_script_shortens_long_dialogue_for_short_window() {
+    let mut s = seg(
+        1,
+        "",
+        "Thật sự thì tôi nghĩ rằng chúng ta nên rời khỏi nơi này ngay lập tức nhé",
+        None,
+    );
+    s.start = 0.0;
+    s.end = 1.1;
+
+    let dubbed = dubbing_script_for_segment(&s);
+
+    assert!(dubbed.len() < s.translated_text.len());
+    assert!(!dubbed.contains("thật sự"));
+}
+
+#[test]
+fn long_dialogue_gets_safe_speed_boost_but_short_dialogue_stays_natural() {
+    let mut long = seg(1, "", "Chúng ta phải rời khỏi nơi này ngay lập tức", None);
+    long.start = 0.0;
+    long.end = 1.0;
+    let mut short = seg(2, "", "Đi thôi.", None);
+    short.start = 1.0;
+    short.end = 3.0;
+
+    let long_settings = effective_settings_for_segment(&long, &TtsSettings::default());
+    let short_settings = effective_settings_for_segment(&short, &TtsSettings::default());
+
+    assert!(long_settings.speed > 1.0);
+    assert!(long_settings.speed <= 1.12);
+    assert_eq!(short_settings.speed, 1.0);
 }

@@ -12,10 +12,23 @@ fn opts_default() -> TranslateOptions {
         chunk_size: 30,
         context_before: 4,
         context_after: 2,
+        retry_context_before: 12,
+        retry_context_after: 12,
+        max_translation_retries: 2,
+        low_confidence_threshold: 0.8,
         temperature: 0.2,
         top_p: 0.95,
         max_tokens: 2048,
     }
+}
+
+#[test]
+fn cache_key_changes_with_retry_settings() {
+    let base = build_cache_key("sha256:t", "sha256:a", &opts_default());
+    let mut alt = opts_default();
+    alt.retry_context_before = 20;
+    let changed = build_cache_key("sha256:t", "sha256:a", &alt);
+    assert_ne!(base, changed);
 }
 
 #[test]

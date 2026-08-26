@@ -380,6 +380,8 @@ export interface TranscribeSegment {
   start: number;
   end: number;
   text: string;
+  speakerId?: string | null;
+  speakerConfidence?: number | null;
   avgLogprob?: number | null;
   noSpeechProb?: number | null;
   words?: WhisperWord[] | null;
@@ -438,6 +440,10 @@ export interface TranslateOptions {
   chunkSize: number;
   contextBefore: number;
   contextAfter: number;
+  retryContextBefore: number;
+  retryContextAfter: number;
+  maxTranslationRetries: number;
+  lowConfidenceThreshold: number;
   temperature: number;
   topP: number;
   maxTokens: number;
@@ -479,6 +485,56 @@ export interface TranslatedSegment {
   start: number;
   end: number;
   edited: boolean;
+  translationMetadata?: Record<string, unknown>;
+}
+
+export type GenderPresentation = "male" | "female" | "unknown" | string;
+export type CharacterAgeGroup =
+  | "child"
+  | "younger"
+  | "adult"
+  | "older"
+  | "unknown"
+  | string;
+
+export interface CharacterProfile {
+  id: string;
+  displayName: string;
+  speakerIds: string[];
+  notes: string;
+  genderPresentation: GenderPresentation;
+  ageGroup: CharacterAgeGroup;
+  defaultSelfReference: string;
+  defaultNeutralAddress: string;
+  userDefined: boolean;
+}
+
+export interface RelationshipRule {
+  fromCharacterId: string;
+  toCharacterId: string;
+  relationshipType: string;
+  selfReference: string;
+  addressTerm: string;
+  confidence: number;
+  source: string;
+  userDefined: boolean;
+}
+
+export interface SegmentPronounFlag {
+  segmentId: number;
+  flags: string[];
+  speakerCharacterId?: string | null;
+  addresseeCharacterIds: string[];
+  ruleKey?: string | null;
+  updatedAt: string;
+}
+
+export interface PronounContextDoc {
+  version: number;
+  characters: CharacterProfile[];
+  relationships: RelationshipRule[];
+  reviewFlags: SegmentPronounFlag[];
+  updatedAt: string;
 }
 
 export interface TranslationSummary {
@@ -557,10 +613,14 @@ export function defaultTranslateOptions(
     model: "",
     sourceLanguage: "en",
     targetLanguage: "vi",
-    promptVersion: "translation_prompt_v2",
-    chunkSize: 10,
-    contextBefore: 2,
-    contextAfter: 2,
+    promptVersion: "translation_prompt_v4",
+    chunkSize: 15,
+    contextBefore: 5,
+    contextAfter: 5,
+    retryContextBefore: 12,
+    retryContextAfter: 12,
+    maxTranslationRetries: 2,
+    lowConfidenceThreshold: 0.8,
     temperature: 0.2,
     topP: 0.95,
     maxTokens: 2048,
@@ -591,6 +651,7 @@ export interface SubtitleSegment {
   dubbingText?: string;
   words?: SubtitleWord[] | null;
   speaker?: string | null;
+  speakerConfidence?: number | null;
   voiceId?: string | null;
 }
 
@@ -814,10 +875,20 @@ export interface TtsSegmentEntry {
   generatedAt: string;
 }
 
+export interface VoiceProfile {
+  characterId: string;
+  speakerId?: string | null;
+  voiceId: string;
+  style: string;
+  speed: number;
+  confidence: number;
+}
+
 export interface TtsManifest {
   version: number;
   engine: string;
   defaultVoiceId: string;
+  voiceProfiles: VoiceProfile[];
   segments: TtsSegmentEntry[];
   createdAt: string;
   updatedAt: string;

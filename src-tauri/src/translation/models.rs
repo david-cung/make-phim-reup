@@ -25,6 +25,14 @@ pub struct TranslateOptions {
     pub context_before: u32,
     #[serde(default = "default_context_after")]
     pub context_after: u32,
+    #[serde(default = "default_retry_context_before")]
+    pub retry_context_before: u32,
+    #[serde(default = "default_retry_context_after")]
+    pub retry_context_after: u32,
+    #[serde(default = "default_max_translation_retries")]
+    pub max_translation_retries: u32,
+    #[serde(default = "default_low_confidence_threshold")]
+    pub low_confidence_threshold: f32,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_top_p")]
@@ -40,16 +48,28 @@ fn vi() -> String {
     "vi".into()
 }
 fn default_prompt_version() -> String {
-    "translation_prompt_v2".into()
+    "translation_prompt_v4".into()
 }
 fn default_chunk_size() -> u32 {
-    10
+    15
 }
 fn default_context_before() -> u32 {
-    2
+    5
 }
 fn default_context_after() -> u32 {
+    5
+}
+fn default_retry_context_before() -> u32 {
+    12
+}
+fn default_retry_context_after() -> u32 {
+    12
+}
+fn default_max_translation_retries() -> u32 {
     2
+}
+fn default_low_confidence_threshold() -> f32 {
+    0.80
 }
 fn default_temperature() -> f32 {
     0.2
@@ -71,6 +91,10 @@ impl Default for TranslateOptions {
             chunk_size: default_chunk_size(),
             context_before: default_context_before(),
             context_after: default_context_after(),
+            retry_context_before: default_retry_context_before(),
+            retry_context_after: default_retry_context_after(),
+            max_translation_retries: default_max_translation_retries(),
+            low_confidence_threshold: default_low_confidence_threshold(),
             temperature: default_temperature(),
             top_p: default_top_p(),
             max_tokens: default_max_tokens(),
@@ -126,6 +150,8 @@ pub struct TranslatedSegment {
     pub end: f64,
     #[serde(default)]
     pub edited: bool,
+    #[serde(default)]
+    pub translation_metadata: serde_json::Value,
 }
 
 /// The full JSON persisted at ``translation/translation.json``.

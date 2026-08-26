@@ -235,3 +235,103 @@ def test_context_ids_are_not_treated_as_missing(tmp_path):
     )
     assert out == {10: "x", 11: "y"}
     assert len(llm.calls) == 1
+
+
+def test_vietnamese_target_retries_cjk_copy(tmp_path):
+    ids = [1]
+    segments = {
+        1: TranslatedSegment(
+            id=1,
+            source_text="相 亲 结 婚 也 没 什么 难 的",
+            translation="",
+            start=1,
+            end=2,
+        )
+    }
+    llm = _ScriptedLlm(
+        [
+            {1: "相亲结婚也挺简单的嘛。"},
+            {1: "Kết hôn qua mai mối cũng đơn giản mà."},
+        ]
+    )
+    out = _provider(tmp_path)._translate_one_chunk(
+        llm=llm,
+        chunk=_chunk(ids),
+        segments_by_id=segments,
+        options=TranslateOptions(
+            model="m.gguf",
+            source_language="zh",
+            target_language="vi",
+            prompt_version="translation_prompt_v3",
+        ),
+        ctx=_FakeCtx(),
+    )
+    assert out == {1: "Kết hôn qua mai mối cũng đơn giản mà."}
+    assert len(llm.calls) == 2
+
+
+def test_vietnamese_target_retries_verbatim_copy(tmp_path):
+    ids = [2]
+    segments = {
+        2: TranslatedSegment(
+            id=2,
+            source_text="Hello there",
+            translation="",
+            start=2,
+            end=3,
+        )
+    }
+    llm = _ScriptedLlm([{2: "Hello there"}, {2: "Xin chào."}])
+    out = _provider(tmp_path)._translate_one_chunk(
+        llm=llm,
+        chunk=_chunk(ids),
+        segments_by_id=segments,
+        options=TranslateOptions(
+            model="m.gguf",
+            source_language="en",
+            target_language="vi",
+            prompt_version="translation_prompt_v3",
+        ),
+        ctx=_FakeCtx(),
+    )
+    assert out == {2: "Xin chào."}
+    assert len(llm.calls) == 2
+
+
+def test_final_rescue_prompt_handles_stubborn_segment(tmp_path):
+    ids = [6]
+    segments = {
+        6: TranslatedSegment(
+            id=6,
+            source_text="沈 总 您 这 一 回 国 不 回 老 宅",
+            translation="",
+            start=6,
+            end=7,
+        )
+    }
+    bad = {6: "沈总，这次回国不回老宅。"}
+    llm = _ScriptedLlm(
+        [
+            bad,
+            bad,
+            bad,
+            bad,
+            {6: "Tổng giám đốc Thẩm, lần này về nước mà không về nhà cũ."},
+        ]
+    )
+    out = _provider(tmp_path)._translate_one_chunk(
+        llm=llm,
+        chunk=_chunk(ids),
+        segments_by_id=segments,
+        options=TranslateOptions(
+            model="m.gguf",
+            source_language="zh",
+            target_language="vi",
+            prompt_version="translation_prompt_v3",
+        ),
+        ctx=_FakeCtx(),
+    )
+    assert out == {
+        6: "Tổng giám đốc Thẩm, lần này về nước mà không về nhà cũ."
+    }
+    assert len(llm.calls) == 5

@@ -35,6 +35,9 @@ use crate::projects::ProjectService;
 use crate::subtitles::{SubtitleCacheFile, SubtitleDoc, SubtitleService};
 use crate::worker::WorkerSupervisor;
 
+use super::automation::{
+    effective_settings_for_segment, prepare_automatic_dubbing, resolve_fallback_voice_id,
+};
 use super::cache::{voices_dir, TtsCacheFile, VOICES_RELATIVE, VOICES_SUBDIR};
 use super::errors::TtsError;
 use super::models::{
@@ -552,7 +555,7 @@ impl TtsService {
     pub async fn generate(
         self: &Arc<Self>,
         project_id: String,
-        request: GenerateRequest,
+        mut request: GenerateRequest,
     ) -> Result<TtsGenerateStart, TtsError> {
         let rec = self
             .projects
@@ -561,28 +564,66 @@ impl TtsService {
             .map_err(map_project_err)?;
         let project_root = PathBuf::from(&rec.root_path);
 
-        let doc = SubtitleCacheFile::load(&project_root)
+        let mut doc = SubtitleCacheFile::load(&project_root)
             .map_err(|source| TtsError::Io {
                 path: project_root.display().to_string(),
                 source,
             })?
             .ok_or(TtsError::NoSubtitles)?;
 
+        let voices = self.list_voices().await?;
+        request.default_voice_id =
+            resolve_fallback_voice_id(&voices, &request.engine, &request.default_voice_id);
         if request.default_voice_id.trim().is_empty() {
             return Err(TtsError::VoiceMissing {
                 engine: request.engine.clone(),
                 voice_id: String::new(),
             });
         }
+        let automatic = prepare_automatic_dubbing(
+            &doc,
+            &voices,
+            &request.engine,
+            &request.default_voice_id,
+        );
+        if automatic.changed {
+            SubtitleCacheFile::save(&project_root, &automatic.doc).map_err(|source| {
+                TtsError::Io {
+                    path: project_root.display().to_string(),
+                    source,
+                }
+            })?;
+            doc = automatic.doc.clone();
+        } else {
+            doc = automatic.doc.clone();
+        }
 
         // Ensure voices/ exists so tmp writes don't race directory creation.
         let _ = std::fs::create_dir_all(voices_dir(&project_root));
 
-        let manifest = TtsCacheFile::load(&project_root).map_err(|source| TtsError::Io {
+        let mut manifest = TtsCacheFile::load(&project_root).map_err(|source| TtsError::Io {
             path: project_root.display().to_string(),
             source,
         })?;
-        let identities = voice_identity_map(self.list_voices().await?);
+        let identities = voice_identity_map(voices);
+        if !automatic.voice_profiles.is_empty() {
+            let mut profile_manifest = manifest.clone().unwrap_or_else(|| {
+                TtsManifest::empty(request.engine.clone(), request.default_voice_id.clone())
+            });
+            if profile_manifest.voice_profiles != automatic.voice_profiles {
+                profile_manifest.engine = request.engine.clone();
+                profile_manifest.default_voice_id = request.default_voice_id.clone();
+                profile_manifest.voice_profiles = automatic.voice_profiles.clone();
+                profile_manifest.updated_at = Utc::now();
+                TtsCacheFile::save(&project_root, &profile_manifest).map_err(|source| {
+                    TtsError::Io {
+                        path: project_root.display().to_string(),
+                        source,
+                    }
+                })?;
+                manifest = Some(profile_manifest);
+            }
+        }
 
         // Build the todo list per the requested mode.
         let todo = plan_generation(&doc, manifest.as_ref(), &request, &identities);
@@ -611,6 +652,7 @@ impl TtsService {
             let mut m = seed_manifest.clone();
             m.engine = request.engine.clone();
             m.default_voice_id = request.default_voice_id.clone();
+            m.voice_profiles = automatic.voice_profiles.clone();
             m.updated_at = Utc::now();
             TtsCacheFile::save(&project_root, &m).map_err(|source| TtsError::Io {
                 path: project_root.display().to_string(),
@@ -1267,7 +1309,7 @@ fn plan_generation(
         if voice_id.trim().is_empty() {
             continue;
         }
-        let effective_settings = settings_default; // per-segment overrides are Phase 7+ material.
+        let effective_settings = effective_settings_for_segment(seg, &settings_default);
         let expected_identity =
             voice_identities.get(&voice_identity_key(&request.engine, &voice_id));
 
@@ -1326,13 +1368,13 @@ fn build_summary_with_identities(
     request: &SummaryRequest,
     voice_identities: Option<&HashMap<String, String>>,
 ) -> TtsSummary {
-    let settings = request.settings.normalised();
     let mut generated = 0u32;
     let mut missing = 0u32;
     let mut stale = 0u32;
     let subtitle_count = doc.segments.len() as u32;
     for seg in &doc.segments {
         let text = pick_text_for_synthesis(seg);
+        let settings = effective_settings_for_segment(seg, &request.settings);
         if text.trim().is_empty() {
             missing += 1;
             continue;

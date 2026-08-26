@@ -77,6 +77,7 @@ pub fn parse(input: &str, start_id: u32) -> Result<Vec<SubtitleSegment>, String>
             dubbing_text: String::new(),
             words: None,
             speaker: None,
+            speaker_confidence: None,
             voice_id: None,
         });
     }
@@ -217,6 +218,7 @@ mod tests {
             dubbing_text: String::new(),
             words: None,
             speaker: None,
+            speaker_confidence: None,
             voice_id: None,
         };
         let srt = write(std::slice::from_ref(&seg), |s| s.translated_text.clone());

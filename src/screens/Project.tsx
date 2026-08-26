@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
+  api,
   mediaUrl,
   pickMediaFile,
   pickRenderOutputPath,
@@ -9,6 +10,12 @@ import {
   pickTtsReferenceAudio,
 } from "@/ipc/bridge";
 import { useAppStore } from "@/state/store";
+import {
+  computeMovieDubbingPipeline,
+  stageStatusForRail,
+  type MovieDubbingPipelineState,
+  type MovieDubbingStage,
+} from "@/pipeline/movieDubbingPipeline";
 import { humanBytes } from "@/utils/format";
 import { TopBar } from "../components/TopBar";
 import { YouTubePanel } from "../components/YouTubePanel";
@@ -48,6 +55,7 @@ import {
   type PreviewMixResult,
   type PreviewResult,
   type PreviewSyncResult,
+  type PronounContextDoc,
   type Project,
   type ProjectMediaState,
   type QualityProfile,
@@ -187,15 +195,18 @@ function ttsModelDisplayLabel(
   return "No TTS model selected";
 }
 
-const WORKFLOW_SECTION: Record<string, EditorSection> = {
-  import: "media",
-  extract: "media",
-  transcribe: "transcription",
-  translate: "translation",
-  tts: "voices",
-  sync: "voices",
-  mix: "mix",
-  render: "render",
+const WORKFLOW_SECTION: Record<MovieDubbingStage, EditorSection> = {
+  mediaPreparation: "media",
+  transcription: "transcription",
+  translation: "translation",
+  dubbingTextPreparation: "subtitles",
+  voiceAssignment: "voices",
+  ttsGeneration: "voices",
+  durationMatching: "voices",
+  audioTimelineAssembly: "voices",
+  audioMixing: "mix",
+  subtitlePreparation: "subtitles",
+  export: "render",
 };
 
 function TtsModelPicker(props: {
@@ -348,7 +359,7 @@ function StickyJobBanner(props: {
 // no progress event and no status change at all.
 function waitForJobTerminal(
   jobId: string,
-  inactivityMs = 15 * 60_000,
+  inactivityMs = 60 * 60_000,
 ): Promise<JobSnapshot> {
   return new Promise((resolve, reject) => {
     const initial = useAppStore.getState().jobsById[jobId];
@@ -358,13 +369,37 @@ function waitForJobTerminal(
     }
 
     let timer: ReturnType<typeof setTimeout>;
+    let pollTimer: ReturnType<typeof setInterval>;
+    let settled = false;
     let lastStatus = initial?.status;
     let lastProgress = useAppStore.getState().jobProgress[jobId];
+
+    const cleanup = () => {
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(pollTimer);
+      unsub();
+    };
+
+    const commitSnapshot = (snap: JobSnapshot) => {
+      useAppStore.setState((state) => {
+        const jobProgress = { ...state.jobProgress };
+        if (isTerminalStatus(snap.status)) {
+          delete jobProgress[snap.id];
+        } else {
+          jobProgress[snap.id] = snap.progress;
+        }
+        return {
+          jobsById: { ...state.jobsById, [snap.id]: snap },
+          jobProgress,
+        };
+      });
+    };
 
     const arm = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        unsub();
+        cleanup();
         reject(
           new Error(
             `No progress from this job for ${Math.round(
@@ -375,12 +410,34 @@ function waitForJobTerminal(
       }, inactivityMs);
     };
 
+    const poll = () => {
+      void api
+        .getJob(jobId)
+        .then((snap) => {
+          if (settled || !snap) return;
+          commitSnapshot(snap);
+          if (isTerminalStatus(snap.status)) {
+            cleanup();
+            resolve(snap);
+            return;
+          }
+          if (snap.status !== lastStatus || snap.progress !== lastProgress) {
+            lastStatus = snap.status;
+            lastProgress = snap.progress;
+            arm();
+          }
+        })
+        .catch(() => {
+          // Event subscription remains authoritative; polling is only a
+          // recovery path for missed job updates.
+        });
+    };
+
     const unsub = useAppStore.subscribe((state) => {
       const snap = state.jobsById[jobId];
       if (!snap) return;
       if (isTerminalStatus(snap.status)) {
-        clearTimeout(timer);
-        unsub();
+        cleanup();
         resolve(snap);
         return;
       }
@@ -392,7 +449,9 @@ function waitForJobTerminal(
       }
     });
 
+    pollTimer = setInterval(poll, 10_000);
     arm();
+    poll();
   });
 }
 
@@ -704,8 +763,8 @@ export default function ProjectView() {
     if (!project) return;
     setTranslateOptions((prev) => ({
       ...prev,
-      sourceLanguage: prev.sourceLanguage || project.sourceLanguage,
-      targetLanguage: prev.targetLanguage || project.targetLanguage,
+      sourceLanguage: project.sourceLanguage || prev.sourceLanguage,
+      targetLanguage: project.targetLanguage || prev.targetLanguage,
     }));
   }, [project]);
 
@@ -877,10 +936,52 @@ export default function ProjectView() {
   // a re-render.
   const [pipelineStep, setPipelineStep] = useState<string | null>(null);
   const pipelineAbortRef = useRef(false);
-  // Export is a separate, explicit user decision now: "Run all" stops at
-  // the mix, then this dialog asks where the movie should go — a local
-  // file or a social destination like YouTube.
+  // Export remains available for choosing a custom path or publishing,
+  // but the one-click Start path now renders the default movie output.
   const [exportOpen, setExportOpen] = useState(false);
+  const [pronounDoc, setPronounDoc] = useState<PronounContextDoc | null>(null);
+  const [pronounBusy, setPronounBusy] = useState(false);
+
+  useEffect(() => {
+    if (!project?.id) {
+      setPronounDoc(null);
+      return;
+    }
+    let cancelled = false;
+    void api
+      .getProjectPronounContext(project.id)
+      .then((doc) => {
+        if (!cancelled) setPronounDoc(doc);
+      })
+      .catch((err) => {
+        if (!cancelled) console.warn("pronoun context load failed", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.id]);
+
+  const savePronounDoc = useCallback(
+    async (next: PronounContextDoc) => {
+      if (!project?.id) return;
+      setPronounBusy(true);
+      try {
+        const saved = await api.saveProjectPronounContext(project.id, next);
+        setPronounDoc(saved);
+        await Promise.all([
+          loadTranslationDoc(project.id),
+          loadSubtitles(project.id),
+          useAppStore.getState().refreshMedia(project.id),
+        ]);
+        setNotice("Pronoun rules saved — affected generated lines are marked for review.");
+      } catch (err) {
+        setError(formatError(err));
+      } finally {
+        setPronounBusy(false);
+      }
+    },
+    [loadSubtitles, loadTranslationDoc, project?.id],
+  );
 
   const subtitleById = useMemo(
     () =>
@@ -907,51 +1008,18 @@ export default function ProjectView() {
     [seekVideo, subtitleById],
   );
 
-  const sourceMediaPath = project?.sourceMediaPath ?? null;
-
-  const workflow = useMemo(
+  const pipeline = useMemo(
     () =>
-      computeWorkflow({
-        hasSource: !!sourceMediaPath,
-        hasAudio: !!media?.audioAbsolutePath,
-        hasTranscript: !!media?.transcript,
-        translationRatio:
-          media?.translation && media?.transcript
-            ? media.translation.translatedCount /
-              Math.max(1, media.translation.segmentCount)
-            : 0,
-        ttsRatio:
-          media?.tts && media.tts.subtitleCount > 0
-            ? media.tts.generatedCount / Math.max(1, media.tts.subtitleCount)
-            : 0,
-        syncRatio:
-          media?.sync && media.sync.subtitleCount > 0
-            ? media.sync.syncedCount / Math.max(1, media.sync.subtitleCount)
-            : 0,
-        mixReady: media?.mix?.status === "ready",
-        renderReady: media?.render?.status === "ready",
-        active: {
-          extract: !!activeExtractionJob,
-          transcribe: !!activeTranscribeJob,
-          translate: !!activeTranslateJob,
-          tts: !!activeTtsJob,
-          sync: !!activeSyncJob,
-          mix: !!activeMixJob,
-          render: !!activeRenderJob,
-        },
+      computeMovieDubbingPipeline({
+        project,
+        media,
+        subtitleDoc,
+        jobsById,
       }),
-    [
-      sourceMediaPath,
-      media,
-      activeExtractionJob,
-      activeTranscribeJob,
-      activeTranslateJob,
-      activeTtsJob,
-      activeSyncJob,
-      activeMixJob,
-      activeRenderJob,
-    ],
+    [project, media, subtitleDoc, jobsById],
   );
+
+  const workflow = useMemo(() => computeWorkflow(pipeline), [pipeline]);
 
   const activeProcessing = useMemo(
     () =>
@@ -2093,13 +2161,14 @@ export default function ProjectView() {
     return true;
   };
 
-  // Runs every stage up to the audio mix. Rendering the final movie is
-  // deliberately *not* part of it — that is the export step, which the
-  // user triggers once they know where the movie should go. Pass
-  // `includeRender` to drive the chain all the way to a file.
+  // Runs the whole one-click movie pipeline through the final render.
+  // Passing `includeRender: false` keeps the old "mix only" behaviour
+  // for internal callers that need it, but the primary Start button now
+  // produces movie_vi.mp4 + movie_vi.srt.
   const runPipeline = async (options?: {
     includeRender?: boolean;
   }): Promise<boolean> => {
+    const includeRender = options?.includeRender ?? true;
     if (!project.sourceMediaPath) {
       setError("Import a video first, then run the pipeline.");
       setSection("media");
@@ -2116,14 +2185,14 @@ export default function ProjectView() {
     try {
       const fresh = () => useAppStore.getState().currentMedia;
 
-      setPipelineStep("Extracting audio");
+      setPipelineStep("Analyzing movie");
       setSection("media");
       const audioReady = await ensureAudioExtracted();
       if (!audioReady) return false;
       throwIfAborted();
 
       if (!fresh()?.transcript) {
-        setPipelineStep("Transcribing");
+        setPipelineStep("Transcribing and identifying speakers");
         setSection("transcription");
         const modelReady = await ensureWhisperModelReady();
         if (!modelReady) return false;
@@ -2138,7 +2207,7 @@ export default function ProjectView() {
       const needsTranslation =
         !tr || tr.translatedCount < tr.segmentCount || tr.segmentCount === 0;
       if (needsTranslation) {
-        setPipelineStep("Translating");
+        setPipelineStep("Translating and validating");
         setSection("translation");
         const opts = await ensureTranslationModelReady();
         if (!opts) return false;
@@ -2152,7 +2221,7 @@ export default function ProjectView() {
       // never runs at all when translation was served from cache. Load
       // the current doc first so we don't kick off a second, concurrent
       // rebuild, then build only if there genuinely isn't one.
-      setPipelineStep("Building subtitles");
+      setPipelineStep("Building movie memory and subtitles");
       setSection("subtitles");
       await loadSubtitles(project.id);
       if (!useAppStore.getState().currentSubtitleDoc) {
@@ -2160,7 +2229,7 @@ export default function ProjectView() {
       }
       throwIfAborted();
 
-      setPipelineStep("Generating voice");
+      setPipelineStep("Generating dubbing script and voices");
       setSection("voices");
       const voiceReady = await ensureTtsVoiceReady();
       if (!voiceReady) return false;
@@ -2172,7 +2241,7 @@ export default function ProjectView() {
         ranSomething = true;
       }
 
-      setPipelineStep("Syncing voice");
+      setPipelineStep("Synchronizing audio");
       if (
         await runStage("sync", () =>
           startApplySync(project.id, { kind: "missing" }),
@@ -2181,14 +2250,14 @@ export default function ProjectView() {
         ranSomething = true;
       }
 
-      setPipelineStep("Mixing audio");
+      setPipelineStep("Mixing Vietnamese audio");
       setSection("mix");
       ranSomething = (await runStage("mix", () => startApplyMix(project.id)))
         ? true
         : ranSomething;
 
-      if (options?.includeRender) {
-        setPipelineStep("Rendering movie");
+      if (includeRender) {
+        setPipelineStep("Rendering final Vietnamese movie");
         setSection("render");
         ranSomething = (await runStage("render", () =>
           startApplyRender(project.id, {}),
@@ -2200,7 +2269,7 @@ export default function ProjectView() {
       setPipelineStep(null);
       await useAppStore.getState().refreshMedia(project.id);
 
-      if (!options?.includeRender) {
+      if (!includeRender) {
         setNotice(
           ranSomething
             ? "Processing finished — the dubbed audio is mixed and ready. Click Export to save the movie or publish it."
@@ -2235,9 +2304,8 @@ export default function ProjectView() {
     }
   };
 
-  // Exporting needs a finished mix — that is the last artefact "Run all"
-  // produces. A movie that was already rendered also qualifies, so a
-  // re-export (different path, or publishing) stays available.
+  // Exporting can start once the mixed audio exists; a rendered movie
+  // also qualifies for re-exporting or publishing.
   const canExport =
     media?.mix?.status === "ready" || media?.render?.status === "ready";
 
@@ -2319,11 +2387,11 @@ export default function ProjectView() {
             <>
               <button
                 className={canExport ? "btn" : "btn primary"}
-                onClick={() => void runPipeline()}
-                title="Transcribe, translate, dub, sync and mix — everything except the final export"
+                onClick={() => void runPipeline({ includeRender: true })}
+                title="Transcribe, translate, dub, sync, mix and render the final Vietnamese movie"
               >
                 <IconSparkles size={14} />
-                <span>Run all</span>
+                <span>Start</span>
               </button>
               <button
                 className="btn primary"
@@ -2856,6 +2924,10 @@ export default function ProjectView() {
             onCancelJob={(jobId) => void cancelJob(jobId)}
             onJumpToSection={setSection}
             pipelineStep={pipelineStep}
+            pipeline={pipeline}
+            pronounDoc={pronounDoc}
+            pronounBusy={pronounBusy}
+            onSavePronounDoc={savePronounDoc}
             ttsPresets={ttsRecommendedVoices}
             ttsVoices={ttsVoices}
             ttsEnv={ttsEnv}
@@ -2951,14 +3023,14 @@ const SECTION_META: Record<
  * The workflow step that decides the small state dot next to each nav row,
  * so the navigator doubles as a progress read-out of the pipeline.
  */
-const SECTION_STEP: Record<EditorSection, string> = {
-  media: "extract",
-  transcription: "transcribe",
-  translation: "translate",
-  subtitles: "transcribe",
-  voices: "tts",
-  mix: "mix",
-  render: "render",
+const SECTION_STEP: Record<EditorSection, MovieDubbingStage> = {
+  media: "mediaPreparation",
+  transcription: "transcription",
+  translation: "translation",
+  subtitles: "dubbingTextPreparation",
+  voices: "ttsGeneration",
+  mix: "audioMixing",
+  render: "export",
 };
 
 function EditorRail(props: {
@@ -3201,6 +3273,7 @@ function SectionBrowser(p: SectionBrowserProps) {
           key={step.key}
           type="button"
           className={`workflow-step ${step.state}`}
+          title={step.detail ?? step.label}
           onClick={() => p.onJumpToSection(WORKFLOW_SECTION[step.key] ?? "media")}
         >
           <span className="wf-marker" aria-hidden="true">
@@ -3210,6 +3283,64 @@ function SectionBrowser(p: SectionBrowserProps) {
         </button>
       ))}
     </>
+  );
+}
+
+const PIPELINE_COMPACT_STAGES: MovieDubbingStage[] = [
+  "mediaPreparation",
+  "transcription",
+  "translation",
+  "dubbingTextPreparation",
+  "voiceAssignment",
+  "ttsGeneration",
+  "durationMatching",
+  "audioTimelineAssembly",
+  "audioMixing",
+  "subtitlePreparation",
+  "export",
+];
+
+function PipelineStatusCompact(props: {
+  pipeline: MovieDubbingPipelineState;
+  onJumpToSection: (s: EditorSection) => void;
+}) {
+  const byStage = new Map(
+    props.pipeline.stages.map((stage) => [stage.stage, stage]),
+  );
+  return (
+    <div className="pipeline-compact" aria-label="Movie dubbing pipeline">
+      {PIPELINE_COMPACT_STAGES.map((stageKey) => {
+        const stageState = byStage.get(stageKey);
+        if (!stageState) return null;
+        const state = stageStatusForRail(stageState.status);
+        const mark =
+          stageState.status === "completed"
+            ? "✓"
+            : stageState.status === "running"
+              ? "●"
+              : stageState.status === "pending"
+                ? "○"
+                : "!";
+        return (
+          <button
+            key={stageKey}
+            type="button"
+            className={`pipeline-compact-row ${state}`}
+            onClick={() =>
+              props.onJumpToSection(WORKFLOW_SECTION[stageKey] ?? "media")
+            }
+            title={stageState.detail ?? stageState.label}
+          >
+            <span className="pipeline-compact-mark" aria-hidden="true">
+              {mark}
+            </span>
+            <span className="pipeline-compact-label">
+              {stageState.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -3643,56 +3774,21 @@ function formatTimecodeShort(t: number): string {
 
 type WorkflowState = {
   steps: {
-    key: string;
+    key: MovieDubbingStage;
     label: string;
     state: "waiting" | "active" | "done" | "error";
+    detail: string | null;
   }[];
 };
 
-function computeWorkflow(input: {
-  hasSource: boolean;
-  hasAudio: boolean;
-  hasTranscript: boolean;
-  translationRatio: number;
-  ttsRatio: number;
-  syncRatio: number;
-  mixReady: boolean;
-  renderReady: boolean;
-  active: {
-    extract: boolean;
-    transcribe: boolean;
-    translate: boolean;
-    tts: boolean;
-    sync: boolean;
-    mix: boolean;
-    render: boolean;
-  };
-}): WorkflowState {
-  const mk = (
-    key: string,
-    label: string,
-    isDone: boolean,
-    isActive: boolean,
-  ) => ({
-    key,
-    label,
-    state: (isActive
-      ? "active"
-      : isDone
-        ? "done"
-        : "waiting") as WorkflowState["steps"][number]["state"],
-  });
+function computeWorkflow(pipeline: MovieDubbingPipelineState): WorkflowState {
   return {
-    steps: [
-      mk("import",     "Import video",      input.hasSource,           false),
-      mk("extract",    "Extract audio",     input.hasAudio,            input.active.extract),
-      mk("transcribe", "Transcribe",        input.hasTranscript,       input.active.transcribe),
-      mk("translate",  "Translate",         input.translationRatio >= .999, input.active.translate),
-      mk("tts",        "Generate voice",    input.ttsRatio >= .999,    input.active.tts),
-      mk("sync",       "Sync voice",        input.syncRatio >= .999,   input.active.sync),
-      mk("mix",        "Mix audio",         input.mixReady,            input.active.mix),
-      mk("render",     "Export movie",      input.renderReady,         input.active.render),
-    ],
+    steps: pipeline.stages.map((step) => ({
+      key: step.stage,
+      label: step.label,
+      state: stageStatusForRail(step.status),
+      detail: step.detail,
+    })),
   };
 }
 
@@ -3860,10 +3956,289 @@ function SubtitleInspector(props: {
   );
 }
 
+function PronounInspector(props: {
+  doc: PronounContextDoc | null;
+  subtitleDoc: SubtitleDoc | null;
+  segment: SubtitleSegment | null;
+  busy: boolean;
+  onSave: (doc: PronounContextDoc) => Promise<void>;
+}) {
+  const doc = props.doc;
+  const seg = props.segment;
+  const speakerLabel = seg?.speaker?.trim() ?? "";
+  const speakerCharacter = useMemo(
+    () =>
+      doc && speakerLabel
+        ? characterForSpeaker(doc, speakerLabel)
+        : null,
+    [doc, speakerLabel],
+  );
+  const inferredAddressee = useMemo(
+    () =>
+      doc && props.subtitleDoc && seg
+        ? inferPronounAddressee(doc, props.subtitleDoc, seg)
+        : null,
+    [doc, props.subtitleDoc, seg],
+  );
+  const [name, setName] = useState("");
+  const [gender, setGender] = useState("unknown");
+  const [age, setAge] = useState("unknown");
+  const [addresseeId, setAddresseeId] = useState("");
+  const [selfRef, setSelfRef] = useState("");
+  const [addressTerm, setAddressTerm] = useState("");
+
+  const currentRule = useMemo(
+    () =>
+      doc && speakerCharacter && addresseeId
+        ? doc.relationships.find(
+            (r) =>
+              r.fromCharacterId === speakerCharacter.id &&
+              r.toCharacterId === addresseeId,
+          ) ?? null
+        : null,
+    [addresseeId, doc, speakerCharacter],
+  );
+
+  useEffect(() => {
+    setName(speakerCharacter?.displayName ?? speakerLabel);
+    setGender(speakerCharacter?.genderPresentation ?? "unknown");
+    setAge(speakerCharacter?.ageGroup ?? "unknown");
+    setAddresseeId(inferredAddressee?.id ?? "");
+  }, [inferredAddressee?.id, speakerCharacter, speakerLabel]);
+
+  useEffect(() => {
+    setSelfRef(currentRule?.selfReference ?? speakerCharacter?.defaultSelfReference ?? "");
+    setAddressTerm(
+      currentRule?.addressTerm ?? speakerCharacter?.defaultNeutralAddress ?? "",
+    );
+  }, [currentRule, speakerCharacter]);
+
+  if (!doc) {
+    return (
+      <div className="section">
+        <div className="section-title">Vietnamese pronouns</div>
+        <div className="loading small">Loading pronoun context…</div>
+      </div>
+    );
+  }
+
+  const flags = seg
+    ? doc.reviewFlags.find((flag) => flag.segmentId === seg.id)?.flags ?? []
+    : [];
+
+  const save = async () => {
+    if (!seg) return;
+    const displayName = name.trim();
+    if (!displayName) return;
+    const next = clonePronounDoc(doc);
+    const characterId = speakerCharacter?.id ?? makeCharacterId(displayName);
+    const existing = next.characters.find((c) => c.id === characterId);
+    if (existing) {
+      existing.displayName = displayName;
+      existing.genderPresentation = gender;
+      existing.ageGroup = age;
+      existing.userDefined = true;
+      if (speakerLabel && !existing.speakerIds.includes(speakerLabel)) {
+        existing.speakerIds.push(speakerLabel);
+      }
+      existing.defaultSelfReference = selfRef.trim();
+      existing.defaultNeutralAddress = addressTerm.trim();
+    } else {
+      next.characters.push({
+        id: characterId,
+        displayName,
+        speakerIds: speakerLabel ? [speakerLabel] : [],
+        notes: "",
+        genderPresentation: gender,
+        ageGroup: age,
+        defaultSelfReference: selfRef.trim(),
+        defaultNeutralAddress: addressTerm.trim(),
+        userDefined: true,
+      });
+    }
+    if (addresseeId && addresseeId !== characterId) {
+      const rule =
+        next.relationships.find(
+          (r) =>
+            r.fromCharacterId === characterId &&
+            r.toCharacterId === addresseeId,
+        ) ?? null;
+      if (rule) {
+        rule.selfReference = selfRef.trim();
+        rule.addressTerm = addressTerm.trim();
+        rule.source = "manual";
+        rule.confidence = 1;
+        rule.userDefined = true;
+      } else {
+        next.relationships.push({
+          fromCharacterId: characterId,
+          toCharacterId: addresseeId,
+          relationshipType: "",
+          selfReference: selfRef.trim(),
+          addressTerm: addressTerm.trim(),
+          confidence: 1,
+          source: "manual",
+          userDefined: true,
+        });
+      }
+    }
+    next.updatedAt = new Date().toISOString();
+    await props.onSave(next);
+  };
+
+  return (
+    <div className="section">
+      <div className="section-title">Vietnamese pronouns</div>
+      {seg ? (
+        <>
+          <div className="prop-grid">
+            <span>Speaker</span>
+            <b>{speakerLabel || "UNKNOWN_SPEAKER"}</b>
+            <span>Character</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Lan, Minh…"
+            />
+            <span>Profile</span>
+            <div className="inline-fields">
+              <select value={gender} onChange={(e) => setGender(e.target.value)}>
+                <option value="unknown">unknown</option>
+                <option value="female">female</option>
+                <option value="male">male</option>
+              </select>
+              <select value={age} onChange={(e) => setAge(e.target.value)}>
+                <option value="unknown">unknown</option>
+                <option value="child">child</option>
+                <option value="younger">younger</option>
+                <option value="adult">adult</option>
+                <option value="older">older</option>
+              </select>
+            </div>
+            <span>Addressing</span>
+            <select
+              value={addresseeId}
+              onChange={(e) => setAddresseeId(e.target.value)}
+            >
+              <option value="">unknown / ambiguous</option>
+              {doc.characters
+                .filter((c) => c.id !== speakerCharacter?.id)
+                .map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.displayName}
+                  </option>
+                ))}
+            </select>
+            <span>Rule</span>
+            <div className="inline-fields">
+              <input
+                value={selfRef}
+                onChange={(e) => setSelfRef(e.target.value)}
+                placeholder="self: chị"
+              />
+              <input
+                value={addressTerm}
+                onChange={(e) => setAddressTerm(e.target.value)}
+                placeholder="address: em"
+              />
+            </div>
+          </div>
+          {flags.length > 0 && (
+            <div className="banner banner--warn small">
+              {flags.join(" · ")}
+            </div>
+          )}
+          <div className="actions">
+            <button
+              className="btn primary small"
+              disabled={props.busy || !name.trim()}
+              onClick={() => void save()}
+            >
+              Save pronoun rule
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="empty-state small">
+          Select a subtitle line to manage speaker and pronoun rules.
+        </div>
+      )}
+      {doc.characters.length > 0 && (
+        <div className="pronoun-character-list">
+          {doc.characters.slice(0, 8).map((character) => (
+            <div className="pronoun-character-row" key={character.id}>
+              <b>{character.displayName}</b>
+              <span>{character.speakerIds.join(", ") || "no speaker"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function clonePronounDoc(doc: PronounContextDoc): PronounContextDoc {
+  return {
+    ...doc,
+    characters: doc.characters.map((c) => ({
+      ...c,
+      speakerIds: [...c.speakerIds],
+    })),
+    relationships: doc.relationships.map((r) => ({ ...r })),
+    reviewFlags: doc.reviewFlags.map((f) => ({
+      ...f,
+      flags: [...f.flags],
+      addresseeCharacterIds: [...f.addresseeCharacterIds],
+    })),
+  };
+}
+
+function characterForSpeaker(doc: PronounContextDoc, speaker: string) {
+  return (
+    doc.characters.find((character) =>
+      character.speakerIds.some((id) => id.trim() === speaker.trim()),
+    ) ?? null
+  );
+}
+
+function inferPronounAddressee(
+  doc: PronounContextDoc,
+  subtitleDoc: SubtitleDoc,
+  segment: SubtitleSegment,
+) {
+  const index = subtitleDoc.segments.findIndex((s) => s.id === segment.id);
+  if (index < 0) return null;
+  const speaker = segment.speaker?.trim() ?? "";
+  const speakerCharacter = speaker ? characterForSpeaker(doc, speaker) : null;
+  const nearby = new Map<string, ReturnType<typeof characterForSpeaker>>();
+  for (const item of [
+    ...subtitleDoc.segments.slice(Math.max(0, index - 3), index).reverse(),
+    ...subtitleDoc.segments.slice(index + 1, index + 3),
+  ]) {
+    const otherSpeaker = item.speaker?.trim();
+    if (!otherSpeaker || otherSpeaker === speaker) continue;
+    const character = characterForSpeaker(doc, otherSpeaker);
+    if (character && character.id !== speakerCharacter?.id) {
+      nearby.set(character.id, character);
+    }
+  }
+  return nearby.size === 1 ? [...nearby.values()][0] : null;
+}
+
+function makeCharacterId(name: string): string {
+  const base = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `character_${base || Date.now()}`;
+}
+
 function Inspector(props: {
   project: Project;
   media: ProjectMediaState | null;
   workflow: WorkflowState;
+  pipeline: MovieDubbingPipelineState;
   subtitleDoc: SubtitleDoc | null;
   selectedSubtitleId: number | null;
   section: EditorSection;
@@ -3874,6 +4249,9 @@ function Inspector(props: {
   onCancelJob: (jobId: string) => void;
   onJumpToSection: (s: EditorSection) => void;
   pipelineStep: string | null;
+  pronounDoc: PronounContextDoc | null;
+  pronounBusy: boolean;
+  onSavePronounDoc: (doc: PronounContextDoc) => Promise<void>;
   ttsPresets: TtsRecommendedVoicePreset[];
   ttsVoices: VoiceInfo[];
   ttsEnv: TtsEnv | null;
@@ -4075,11 +4453,16 @@ function Inspector(props: {
               automatically.
             </div>
           )}
+          <PipelineStatusCompact
+            pipeline={props.pipeline}
+            onJumpToSection={props.onJumpToSection}
+          />
           {props.workflow.steps.map((step) => (
             <button
               key={step.key}
               type="button"
               className={`workflow-step ${step.state}`}
+              title={step.detail ?? step.label}
               onClick={() =>
                 props.onJumpToSection(WORKFLOW_SECTION[step.key] ?? "media")
               }
@@ -4091,6 +4474,14 @@ function Inspector(props: {
             </button>
           ))}
         </div>
+
+        <PronounInspector
+          doc={props.pronounDoc}
+          subtitleDoc={props.subtitleDoc}
+          segment={seg}
+          busy={props.pronounBusy}
+          onSave={props.onSavePronounDoc}
+        />
 
         {props.processing.length > 0 && (
           <div className="section">
@@ -7540,9 +7931,8 @@ function Panel(props: { title: string; children: React.ReactNode }) {
   );
 }
 
-// Export is the last, explicit step of the workflow. "Run all" stops at
-// the mix, so this dialog is where the user decides what the finished
-// movie becomes: a file on disk, or a published video.
+// Export lets the user render to a custom path or publish the latest
+// final movie after the one-click output exists.
 function ExportModal(props: {
   renderedPath: string | null;
   outputPath: string | null;

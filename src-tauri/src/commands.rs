@@ -14,12 +14,12 @@ use crate::db::models::{ProjectModelPatch, ProjectRecord, ProjectSummary};
 use crate::errors::AppError;
 use crate::ffmpeg::extract::AudioExtractParams;
 use crate::ffmpeg::{probe, FfmpegAvailability, VideoMetadata};
-use crate::ipc::{AppInfo, ProjectMediaState};
 use crate::integrations::youtube::{
     YouTubeAccount, YouTubeConnectionState, YouTubeError, YouTubePlaylist, YouTubePublishOptions,
     YouTubePublishingHistoryEntry, YouTubeThumbnailResult, YouTubeUploadSnapshot,
     YouTubeVideoMetadata,
 };
+use crate::ipc::{AppInfo, ProjectMediaState};
 use crate::jobs::{JobSnapshot, JobsRepo};
 use crate::mix::{
     MixEnv, MixGenerateStart, MixManifest, MixRequest, MixSettings, MixSummary, PreviewMixResult,
@@ -28,6 +28,10 @@ use crate::models::{
     self as model_mgr, ImportSpec, LocalModel, ModelDirectoryInfo, ModelManagerError,
 };
 use crate::projects::service::{CreateProjectInput, ImportMediaInput, ImportMediaResult};
+use crate::pronouns::{
+    changed_relationship_keys, changed_speaker_ids, relationship_key, segment_contexts,
+    upsert_review_flag, PronounCacheFile, PronounContextDoc,
+};
 use crate::render::{
     RenderEnv, RenderGenerateStart, RenderManifest, RenderRequest, RenderSettings, RenderStatus,
     RenderSummary,
@@ -60,8 +64,11 @@ use crate::worker::{EnvInfo, PingResponse, WorkerStatus};
 #[tauri::command]
 pub async fn get_media_base_url() -> Result<String, AppError> {
     let url = crate::media_server::base_url().ok_or_else(|| {
-        AppError::new("MEDIA_SERVER_UNAVAILABLE", "the local media server is not running")
-            .with_hint("Restart the app. Playback needs it; the rest of the pipeline does not.")
+        AppError::new(
+            "MEDIA_SERVER_UNAVAILABLE",
+            "the local media server is not running",
+        )
+        .with_hint("Restart the app. Playback needs it; the rest of the pipeline does not.")
     })?;
     tracing::debug!("frontend requested media server URL");
     Ok(url)
@@ -381,6 +388,15 @@ pub async fn cancel_job(state: State<'_, AppState>, job_id: String) -> Result<()
 }
 
 #[tauri::command]
+pub async fn get_job(
+    state: State<'_, AppState>,
+    job_id: String,
+) -> Result<Option<crate::jobs::JobSnapshot>, AppError> {
+    let db = state.db.clone();
+    Ok(db.run(move |d| JobsRepo::get(d, &job_id)).await?)
+}
+
+#[tauri::command]
 pub async fn list_active_jobs(
     state: State<'_, AppState>,
     project_id: String,
@@ -629,6 +645,111 @@ pub async fn update_translation_segment(
         .translation
         .update_segment(project_id, segment_id, translation)
         .await?)
+}
+
+#[tauri::command]
+pub async fn get_project_pronoun_context(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<PronounContextDoc, AppError> {
+    let rec = state.projects.open(project_id).await?;
+    let root = PathBuf::from(&rec.root_path);
+    PronounCacheFile::load(&root).map_err(pronoun_io_error)
+}
+
+#[tauri::command]
+pub async fn save_project_pronoun_context(
+    state: State<'_, AppState>,
+    project_id: String,
+    doc: PronounContextDoc,
+) -> Result<PronounContextDoc, AppError> {
+    let rec = state.projects.open(project_id).await?;
+    let root = PathBuf::from(&rec.root_path);
+    let previous = PronounCacheFile::load(&root).map_err(pronoun_io_error)?;
+    let mut next = doc;
+    let relationship_changes = changed_relationship_keys(&previous, &next);
+    let speaker_changes = changed_speaker_ids(&previous, &next);
+    mark_pronoun_affected_translations(&root, &mut next, &relationship_changes, &speaker_changes)?;
+    PronounCacheFile::save(&root, &next).map_err(pronoun_io_error)?;
+    PronounCacheFile::load(&root).map_err(pronoun_io_error)
+}
+
+fn pronoun_io_error(err: std::io::Error) -> AppError {
+    AppError::new("PRONOUN_CONTEXT_IO", err.to_string())
+        .with_stage("pronouns")
+        .with_hint("Check that the project folder is writable.")
+}
+
+fn mark_pronoun_affected_translations(
+    project_root: &std::path::Path,
+    doc: &mut PronounContextDoc,
+    relationship_changes: &std::collections::BTreeSet<String>,
+    speaker_changes: &std::collections::BTreeSet<String>,
+) -> Result<(), AppError> {
+    if relationship_changes.is_empty() && speaker_changes.is_empty() {
+        return Ok(());
+    }
+    let subtitles =
+        crate::subtitles::SubtitleCacheFile::load(project_root).map_err(pronoun_io_error)?;
+    let Some(subtitles) = subtitles else {
+        return Ok(());
+    };
+    let mut translation =
+        crate::translation::TranslationCacheFile::load(project_root).map_err(pronoun_io_error)?;
+    let Some(mut translation) = translation.take() else {
+        return Ok(());
+    };
+    let contexts = segment_contexts(doc, Some(&subtitles));
+    let speaker_by_segment = subtitles
+        .segments
+        .iter()
+        .map(|s| (s.id, s.speaker.clone().unwrap_or_default()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut changed = false;
+    for segment in &mut translation.segments {
+        if segment.edited {
+            continue;
+        }
+        let ctx = contexts.get(&segment.id);
+        let rule_changed = ctx
+            .and_then(|c| c.rule.as_ref())
+            .map(relationship_key)
+            .map(|key| relationship_changes.contains(&key))
+            .unwrap_or(false);
+        let speaker_changed = speaker_by_segment
+            .get(&segment.id)
+            .map(|speaker| speaker_changes.contains(speaker.trim()))
+            .unwrap_or(false);
+        if !rule_changed && !speaker_changed {
+            continue;
+        }
+        if !segment.translation.trim().is_empty() || !segment.dubbing.trim().is_empty() {
+            segment.translation.clear();
+            segment.dubbing.clear();
+            changed = true;
+        }
+        upsert_review_flag(
+            doc,
+            segment.id,
+            vec![
+                "NEEDS_RETRANSLATION".into(),
+                "PRONOUN_RULE_CHANGED".into(),
+                "USER_REVIEW_RECOMMENDED".into(),
+            ],
+            ctx,
+        );
+    }
+    if changed {
+        translation.updated_at = chrono::Utc::now();
+        crate::translation::TranslationCacheFile::save(project_root, &translation)
+            .map_err(pronoun_io_error)?;
+        let mut subtitle_doc = subtitles;
+        subtitle_doc.dirty.mark_content_dirty();
+        subtitle_doc.updated_at = chrono::Utc::now();
+        crate::subtitles::SubtitleCacheFile::save(project_root, &subtitle_doc)
+            .map_err(pronoun_io_error)?;
+    }
+    Ok(())
 }
 
 // ---------- Phase 5 (Subtitle editor) ----------
@@ -1513,23 +1634,20 @@ pub async fn start_youtube_upload(
     }
     let project = state.projects.open(project_id.clone()).await?;
     let options = options.unwrap_or_default();
-    let subtitle_doc = if options.publish_translated_subtitles
-        || options.publish_original_subtitles
+    let subtitle_doc = if options.publish_translated_subtitles || options.publish_original_subtitles
     {
         state.subtitles.get_doc(project_id.clone()).await?
     } else {
         None
     };
-    Ok(state
-        .youtube
-        .start_upload(
-            project_id,
-            PathBuf::from(project.root_path),
-            PathBuf::from(rendered.file_absolute),
-            metadata,
-            options,
-            subtitle_doc,
-        )?)
+    Ok(state.youtube.start_upload(
+        project_id,
+        PathBuf::from(project.root_path),
+        PathBuf::from(rendered.file_absolute),
+        metadata,
+        options,
+        subtitle_doc,
+    )?)
 }
 
 #[tauri::command]
@@ -1578,9 +1696,9 @@ pub async fn generate_youtube_thumbnail(
         .get_manifest(project_id)
         .await?
         .ok_or_else(|| YouTubeError::InvalidVideo("No rendered movie is available.".into()))?;
-    let rendered = manifest.current.ok_or_else(|| {
-        YouTubeError::InvalidVideo("The project has no completed render.".into())
-    })?;
+    let rendered = manifest
+        .current
+        .ok_or_else(|| YouTubeError::InvalidVideo("The project has no completed render.".into()))?;
     Ok(state
         .youtube
         .generate_thumbnail(

@@ -90,6 +90,8 @@ mod tests {
                 start: 0.0,
                 end: 1.0,
                 text: "hi".into(),
+                speaker_id: None,
+                speaker_confidence: None,
                 avg_logprob: None,
                 no_speech_prob: None,
                 words: None,
@@ -107,6 +109,7 @@ mod tests {
             created_at: Utc::now(),
             provider: "faster-whisper".into(),
             options: json!({}),
+            speaker_memory: json!({}),
         }
     }
 

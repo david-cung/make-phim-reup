@@ -29,6 +29,7 @@ fn subtitle(id: u32, start: f64, end: f64, text: &str) -> SubtitleSegment {
         dubbing_text: text.into(),
         words: None,
         speaker: None,
+        speaker_confidence: None,
         voice_id: Some("vi-narrator".into()),
     }
 }
@@ -79,6 +80,7 @@ fn tts_manifest(entries: Vec<TtsSegmentEntry>) -> TtsManifest {
         version: TTS_CACHE_SCHEMA_VERSION,
         engine: "piper".into(),
         default_voice_id: "vi-narrator".into(),
+        voice_profiles: Vec::new(),
         segments: entries,
         created_at: now,
         updated_at: now,

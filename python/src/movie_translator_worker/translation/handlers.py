@@ -29,8 +29,9 @@ from .models import (
     TranslateOptions,
     TranslatedSegment,
     build_cache_key,
-    chunk_segments,
+    chunk_segments_with_context,
     missing_ids,
+    ensure_translation_result,
 )
 from .provider import (
     ProviderCancelled,
@@ -287,7 +288,8 @@ def translate_translate(params: dict[str, Any], ctx: HandlerContext) -> dict[str
 
     # Chunk *only* the ids that still need work — completed segments
     # don't need re-translation and shouldn't waste context.
-    chunks = chunk_segments(
+    chunks = chunk_segments_with_context(
+        ordered_ids,
         todo_ids,
         chunk_size=options.chunk_size,
         context_before=options.context_before,
@@ -316,7 +318,7 @@ def translate_translate(params: dict[str, Any], ctx: HandlerContext) -> dict[str
                 },
             )
 
-        def on_chunk_completed(self, chunk_index: int, translations: dict[int, str]) -> None:
+        def on_chunk_completed(self, chunk_index: int, translations: dict) -> None:
             nonlocal completed
             completed += len(translations)
             ctx.emit_progress(
@@ -324,8 +326,12 @@ def translate_translate(params: dict[str, Any], ctx: HandlerContext) -> dict[str
                 {
                     "chunkIndex": chunk_index,
                     "translations": [
-                        {"id": sid, "translation": text}
-                        for sid, text in translations.items()
+                        {
+                            "id": sid,
+                            "translation": (result := ensure_translation_result(value)).translation,
+                            "metadata": result.metadata.to_dict(),
+                        }
+                        for sid, value in translations.items()
                     ],
                     "completedSegments": completed_baseline + completed,
                     "totalSegments": len(ordered_ids),
@@ -410,10 +416,14 @@ def _options_from_params(params: dict[str, Any]) -> TranslateOptions:
             model=model,
             source_language=str(opts.get("sourceLanguage") or "en"),
             target_language=str(opts.get("targetLanguage") or "vi"),
-            prompt_version=str(opts.get("promptVersion") or "translation_prompt_v2"),
-            chunk_size=int(opts.get("chunkSize", 10)),
-            context_before=int(opts.get("contextBefore", 2)),
-            context_after=int(opts.get("contextAfter", 2)),
+            prompt_version=str(opts.get("promptVersion") or "translation_prompt_v4"),
+            chunk_size=int(opts.get("chunkSize", 15)),
+            context_before=int(opts.get("contextBefore", 5)),
+            context_after=int(opts.get("contextAfter", 5)),
+            retry_context_before=int(opts.get("retryContextBefore", 12)),
+            retry_context_after=int(opts.get("retryContextAfter", 12)),
+            max_translation_retries=int(opts.get("maxTranslationRetries", 2)),
+            low_confidence_threshold=float(opts.get("lowConfidenceThreshold", 0.80)),
             temperature=float(opts.get("temperature", 0.2)),
             top_p=float(opts.get("topP", 0.95)),
             max_tokens=int(opts.get("maxTokens", 2048)),
@@ -435,6 +445,9 @@ def _load_segments(
             text = str(item.get("text", ""))
             start = float(item.get("start", 0.0))
             end = float(item.get("end", 0.0))
+            pronoun_context = item.get("pronounContext")
+            speaker_id = item.get("speakerId")
+            speaker_confidence = item.get("speakerConfidence")
         except (KeyError, TypeError, ValueError) as e:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, f"invalid segment: {e}") from e
         if sid in by_id:
@@ -445,6 +458,13 @@ def _load_segments(
             translation="",
             start=start,
             end=end,
+            pronoun_context=dict(pronoun_context or {})
+            if isinstance(pronoun_context, dict)
+            else {},
+            speaker_id=str(speaker_id) if speaker_id is not None else None,
+            speaker_confidence=float(speaker_confidence)
+            if speaker_confidence is not None
+            else None,
         )
         order.append(sid)
     return by_id, order
@@ -496,6 +516,10 @@ def _apply_existing(
                     start=base.start,
                     end=base.end,
                     edited=edited,
+                    pronoun_context=base.pronoun_context,
+                    metadata=base.metadata,
+                    speaker_id=base.speaker_id,
+                    speaker_confidence=base.speaker_confidence,
                 )
             )
         else:

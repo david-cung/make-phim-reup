@@ -37,6 +37,7 @@ import {
   type PreviewMixResult,
   type PreviewResult,
   type PreviewSyncResult,
+  type PronounContextDoc,
   type RenderEnv,
   type RenderGenerateStart,
   type RenderManifest,
@@ -142,6 +143,8 @@ export const api = {
   extractAudio: (projectId: string) =>
     invoke<ExtractionStart>("extract_audio", { projectId }),
   cancelJob: (jobId: string) => invoke<void>("cancel_job", { jobId }),
+  getJob: (jobId: string) =>
+    invoke<JobSnapshot | null>("get_job", { jobId }),
   listActiveJobs: (projectId: string) =>
     invoke<JobSnapshot[]>("list_active_jobs", { projectId }),
 
@@ -185,6 +188,13 @@ export const api = {
       projectId,
       segmentId,
       translation,
+    }),
+  getProjectPronounContext: (projectId: string) =>
+    invoke<PronounContextDoc>("get_project_pronoun_context", { projectId }),
+  saveProjectPronounContext: (projectId: string, doc: PronounContextDoc) =>
+    invoke<PronounContextDoc>("save_project_pronoun_context", {
+      projectId,
+      doc,
     }),
 
   // Phase 5 (Subtitle editor)

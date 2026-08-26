@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional, Protocol, runtime_checkable
 
-from .models import TranslateOptions, TranslationChunk, TranslatedSegment
+from .models import TranslateOptions, TranslationChunk, TranslatedSegment, TranslationResult
 
 
 # (fraction 0..1, stage, optional message)
@@ -49,10 +49,10 @@ class TranslateContext(Protocol):
     def on_chunk_completed(
         self,
         chunk_index: int,
-        translations: dict[int, str],
+        translations: dict[int, TranslationResult],
     ) -> None:
         """Callback invoked as each chunk finishes so the host can persist
-        incrementally. ``translations`` maps ``segment_id -> translation``.
+        incrementally. ``translations`` maps ``segment_id -> result``.
         """
         ...
 
@@ -69,7 +69,7 @@ class TranslationProvider(Protocol):
         segments_by_id: dict[int, TranslatedSegment],
         options: TranslateOptions,
         ctx: TranslateContext,
-    ) -> dict[int, str]:
+    ) -> dict[int, TranslationResult]:
         """Translate the given chunks.
 
         Returns a ``{segment_id: translation}`` map covering every id

@@ -112,6 +112,13 @@ pub fn empty_doc_from(
             start: *start,
             end: *end,
             edited: false,
+            translation_metadata: serde_json::json!({
+                "confidence": null,
+                "needsReview": false,
+                "retryCount": 0,
+                "translationMethod": null,
+                "reasonFlags": [],
+            }),
         })
         .collect();
     TranslationDoc {
@@ -134,16 +141,17 @@ pub fn empty_doc_from(
 /// Apply a chunk-completed batch of translations to an in-memory doc.
 /// Returns the number of segments actually updated (ids not in the
 /// doc are silently ignored).
-pub fn apply_chunk(doc: &mut TranslationDoc, updates: &[(u32, String)]) -> u32 {
+pub fn apply_chunk(doc: &mut TranslationDoc, updates: &[(u32, String, serde_json::Value)]) -> u32 {
     let mut hits = 0u32;
-    for (id, text) in updates {
+    for (id, text, metadata) in updates {
         if let Some(seg) = doc.segments.iter_mut().find(|s| s.id == *id) {
-            let custom_dubbing = !seg.dubbing.trim().is_empty()
-                && seg.dubbing.trim() != seg.translation.trim();
+            let custom_dubbing =
+                !seg.dubbing.trim().is_empty() && seg.dubbing.trim() != seg.translation.trim();
             seg.translation = text.clone();
             if !custom_dubbing {
                 seg.dubbing = text.clone();
             }
+            seg.translation_metadata = metadata.clone();
             hits += 1;
         }
     }
@@ -191,6 +199,7 @@ mod tests {
                     start: 0.0,
                     end: 1.0,
                     edited: false,
+                    translation_metadata: serde_json::json!({}),
                 },
                 TranslatedSegment {
                     id: 1,
@@ -208,6 +217,7 @@ mod tests {
                     start: 1.0,
                     end: 2.0,
                     edited: false,
+                    translation_metadata: serde_json::json!({}),
                 },
             ],
             model: "qwen2.gguf".into(),
@@ -259,7 +269,13 @@ mod tests {
     #[test]
     fn apply_chunk_updates_only_matching_ids() {
         let mut doc = sample("k", "t", false);
-        let hits = apply_chunk(&mut doc, &[(0, "Xin chào".into()), (5, "ignored".into())]);
+        let hits = apply_chunk(
+            &mut doc,
+            &[
+                (0, "Xin chào".into(), serde_json::json!({"confidence": 0.9})),
+                (5, "ignored".into(), serde_json::json!({})),
+            ],
+        );
         assert_eq!(hits, 1);
         assert_eq!(doc.segments[0].translation, "Xin chào");
         assert_eq!(doc.segments[1].translation, "");

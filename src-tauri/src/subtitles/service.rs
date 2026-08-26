@@ -136,6 +136,7 @@ impl SubtitleService {
             }
             if let Some(v) = patch.speaker {
                 seg.speaker = v;
+                seg.speaker_confidence = None;
             }
             if let Some(v) = patch.voice_id {
                 seg.voice_id = v;
@@ -206,6 +207,7 @@ impl SubtitleService {
                 dubbing_text: String::new(),
                 words: None,
                 speaker: None,
+                speaker_confidence: None,
                 voice_id: None,
             };
             seg.validate_timing()

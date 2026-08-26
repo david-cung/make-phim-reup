@@ -101,6 +101,7 @@ pub fn parse(input: &str, start_id: u32) -> Result<Vec<SubtitleSegment>, String>
             dubbing_text: String::new(),
             words: None,
             speaker,
+            speaker_confidence: None,
             voice_id: None,
         });
     }
@@ -269,6 +270,7 @@ mod tests {
             dubbing_text: String::new(),
             words: None,
             speaker: Some("Bob".into()),
+            speaker_confidence: None,
             voice_id: None,
         };
         let ass = write(std::slice::from_ref(&seg), "en", "vi", |s| {
@@ -293,6 +295,7 @@ mod tests {
             dubbing_text: String::new(),
             words: None,
             speaker: None,
+            speaker_confidence: None,
             voice_id: None,
         };
         let ass = write(std::slice::from_ref(&seg), "en", "vi", |s| {

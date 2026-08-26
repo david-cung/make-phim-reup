@@ -27,6 +27,25 @@ pub struct JobRow {
 pub struct JobsRepo;
 
 impl JobsRepo {
+    pub fn get(db: &Db, id: &str) -> Result<Option<JobSnapshot>, DbError> {
+        let conn = db.raw().lock();
+        conn.query_row(
+            "SELECT id, project_id, stage, status, progress,
+                    error_code, error_message,
+                    created_at, started_at, completed_at
+             FROM jobs
+             WHERE id = ?1
+             LIMIT 1",
+            params![id],
+            row_to_snapshot,
+        )
+        .optional()
+        .map_err(|source| DbError::Sqlite {
+            ctx: "get job",
+            source,
+        })
+    }
+
     pub fn insert(db: &Db, snap: &JobSnapshot) -> Result<(), DbError> {
         let conn = db.raw().lock();
         conn.execute(
@@ -347,8 +366,15 @@ mod tests {
             .unwrap();
         }
         JobsRepo::insert(&db, &sample_snapshot("job_stt_1", "p1")).unwrap();
-        JobsRepo::update_status(&db, "job_stt_1", JobStatus::Completed, Some(1.0), None, None)
-            .unwrap();
+        JobsRepo::update_status(
+            &db,
+            "job_stt_1",
+            JobStatus::Completed,
+            Some(1.0),
+            None,
+            None,
+        )
+        .unwrap();
         let latest = JobsRepo::latest_by_stage(&db, "p1", JobStage::Transcribe)
             .unwrap()
             .expect("latest job should exist");

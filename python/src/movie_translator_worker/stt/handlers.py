@@ -30,6 +30,7 @@ from ..errors import RpcError, RpcErrorCode
 from ..rpc import HandlerContext
 from . import registry
 from .device import default_device, detect_devices
+from .diarization import diarize_segments
 from .hardware import large_v3_capability, memory_stats, profile_params
 from .segment import resegment
 from .faster_whisper_provider import FasterWhisperProvider
@@ -170,6 +171,9 @@ def stt_transcribe(params: dict[str, Any], ctx: HandlerContext) -> dict[str, Any
     if options.resegment:
         on_progress(0.97, "segmenting", None)
         segments = resegment(segments)
+    on_progress(0.985, "diarizing", None)
+    diarized = diarize_segments(audio_path, segments)
+    segments = diarized.segments
     validate_segments(segments)
     on_progress(1.0, "completed", None)
 
@@ -183,6 +187,7 @@ def stt_transcribe(params: dict[str, Any], ctx: HandlerContext) -> dict[str, Any
         "computeType": options.compute_type,
         "wordTimestamps": options.word_timestamps,
         "options": _options_to_wire(options),
+        "speakerMemory": diarized.speaker_memory,
     }
 
 
@@ -344,6 +349,10 @@ def _segment_to_wire(s: Segment) -> dict[str, Any]:
         out["avgLogprob"] = s.avg_logprob
     if s.no_speech_prob is not None:
         out["noSpeechProb"] = s.no_speech_prob
+    if s.speaker_id:
+        out["speakerId"] = s.speaker_id
+    if s.speaker_confidence is not None:
+        out["speakerConfidence"] = round(float(s.speaker_confidence), 4)
     if s.words:
         out["words"] = [
             {

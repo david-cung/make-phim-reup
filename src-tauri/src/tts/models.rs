@@ -209,6 +209,18 @@ pub struct VoiceInfo {
     pub style: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceProfile {
+    pub character_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+    pub voice_id: String,
+    pub style: String,
+    pub speed: f32,
+    pub confidence: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateVoiceProfileRequest {
@@ -265,6 +277,8 @@ pub struct TtsManifest {
     pub engine: String,
     #[serde(default)]
     pub default_voice_id: String,
+    #[serde(default)]
+    pub voice_profiles: Vec<VoiceProfile>,
     pub segments: Vec<TtsSegmentEntry>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -277,6 +291,7 @@ impl TtsManifest {
             version: TTS_CACHE_SCHEMA_VERSION,
             engine,
             default_voice_id,
+            voice_profiles: Vec::new(),
             segments: Vec::new(),
             created_at: now,
             updated_at: now,

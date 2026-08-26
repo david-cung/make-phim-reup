@@ -22,6 +22,8 @@ fn transcript(segments: Vec<(u32, f64, f64, &str)>) -> Transcript {
                 start,
                 end,
                 text: text.into(),
+                speaker_id: None,
+                speaker_confidence: None,
                 avg_logprob: None,
                 no_speech_prob: None,
                 words: None,
@@ -40,7 +42,22 @@ fn transcript(segments: Vec<(u32, f64, f64, &str)>) -> Transcript {
         created_at: Utc::now(),
         provider: "faster-whisper".into(),
         options: serde_json::json!({}),
+        speaker_memory: serde_json::json!({}),
     }
+}
+
+fn transcript_with_speaker() -> Transcript {
+    let mut t = transcript(vec![(0, 0.0, 1.0, "hello")]);
+    t.segments[0].speaker_id = Some("speaker_001".into());
+    t.segments[0].speaker_confidence = Some(0.91);
+    t.speaker_memory = serde_json::json!({
+        "speaker_001": {
+            "segments": ["segment_0"],
+            "firstSeen": 0.0,
+            "confidence": 0.91
+        }
+    });
+    t
 }
 
 fn translation(pairs: Vec<(u32, &str)>) -> TranslationDoc {
@@ -59,6 +76,7 @@ fn translation(pairs: Vec<(u32, &str)>) -> TranslationDoc {
                 start: 0.0,
                 end: 0.0,
                 edited: false,
+                translation_metadata: serde_json::json!({}),
             })
             .collect(),
         model: "qwen2.gguf".into(),
@@ -87,6 +105,13 @@ fn derive_combines_transcript_and_translation() {
         doc.derived_from.transcript_cache_key.as_deref(),
         Some("sha256:tk")
     );
+}
+
+#[test]
+fn derive_carries_automatic_speaker_metadata() {
+    let doc = derive_from_sources(&transcript_with_speaker(), None, "en", "vi");
+    assert_eq!(doc.segments[0].speaker.as_deref(), Some("speaker_001"));
+    assert_eq!(doc.segments[0].speaker_confidence, Some(0.91));
 }
 
 #[test]

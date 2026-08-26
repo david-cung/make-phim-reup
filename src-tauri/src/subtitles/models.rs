@@ -34,6 +34,8 @@ pub struct SubtitleSegment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_id: Option<String>,
 }
 

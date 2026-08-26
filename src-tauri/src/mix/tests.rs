@@ -45,6 +45,7 @@ fn subtitle(id: u32, start: f64, end: f64) -> SubtitleSegment {
         dubbing_text: "xin chào".into(),
         words: None,
         speaker: None,
+        speaker_confidence: None,
         voice_id: Some("vi-narrator".into()),
     }
 }
