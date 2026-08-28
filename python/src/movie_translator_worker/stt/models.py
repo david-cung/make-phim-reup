@@ -37,6 +37,12 @@ class Segment:
     words: Optional[list[Word]] = None
     speaker_id: Optional[str] = None
     speaker_confidence: Optional[float] = None
+    raw_text: Optional[str] = None
+    normalized_text: Optional[str] = None
+    source_segment_id: Optional[str] = None
+    source_sub_segment_id: Optional[str] = None
+    source_quality: Optional[dict[str, Any]] = None
+    semantic_facts: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -194,7 +200,7 @@ def build_cache_key(audio_hash: str, options: TranscribeOptions) -> str:
     cache.
     """
     parts = [
-        "v2",
+        "v3_source_reconstruction",
         audio_hash,
         options.model,
         options.normalised_language(),
@@ -230,6 +236,18 @@ def _segment_to_dict(s: Segment) -> dict[str, Any]:
         d["speakerId"] = s.speaker_id
     if s.speaker_confidence is not None:
         d["speakerConfidence"] = round(float(s.speaker_confidence), 4)
+    if s.raw_text is not None:
+        d["rawText"] = s.raw_text
+    if s.normalized_text is not None:
+        d["normalizedText"] = s.normalized_text
+    if s.source_segment_id is not None:
+        d["sourceSegmentId"] = s.source_segment_id
+    if s.source_sub_segment_id is not None:
+        d["sourceSubSegmentId"] = s.source_sub_segment_id
+    if s.source_quality is not None:
+        d["sourceQuality"] = s.source_quality
+    if s.semantic_facts is not None:
+        d["semanticFacts"] = s.semantic_facts
     if s.words:
         d["words"] = [_word_to_dict(w) for w in s.words]
     return d
@@ -255,6 +273,36 @@ def _segment_from_dict(payload: Any) -> Segment:
                 else None
             ),
             speaker_confidence=_opt_float(payload.get("speakerConfidence")),
+            raw_text=(
+                str(payload.get("rawText"))
+                if payload.get("rawText") is not None
+                else None
+            ),
+            normalized_text=(
+                str(payload.get("normalizedText"))
+                if payload.get("normalizedText") is not None
+                else None
+            ),
+            source_segment_id=(
+                str(payload.get("sourceSegmentId"))
+                if payload.get("sourceSegmentId") is not None
+                else None
+            ),
+            source_sub_segment_id=(
+                str(payload.get("sourceSubSegmentId"))
+                if payload.get("sourceSubSegmentId") is not None
+                else None
+            ),
+            source_quality=(
+                dict(payload.get("sourceQuality"))
+                if isinstance(payload.get("sourceQuality"), dict)
+                else None
+            ),
+            semantic_facts=(
+                dict(payload.get("semanticFacts"))
+                if isinstance(payload.get("semanticFacts"), dict)
+                else None
+            ),
         )
     except KeyError as e:
         raise ValueError(f"segment missing required field: {e}") from e

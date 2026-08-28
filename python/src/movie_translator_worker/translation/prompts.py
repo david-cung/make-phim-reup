@@ -22,6 +22,7 @@ TRANSLATION_PROMPT_V1 = "translation_prompt_v1"
 TRANSLATION_PROMPT_V2 = "translation_prompt_v2"
 TRANSLATION_PROMPT_V3 = "translation_prompt_v3"
 TRANSLATION_PROMPT_V4 = "translation_prompt_v4"
+TRANSLATION_PROMPT_V5 = "translation_prompt_v5"
 
 # ISO-639-1 → human name. Only entries here get pretty-printed in the
 # prompt; everything else falls back to the code itself.
@@ -291,9 +292,12 @@ def user_prompt_v3(
         "When automaticPronounPlan.enforce is true, treat self_pronoun and target_pronoun as strong constraints for the CURRENT speaker's line.\n"
         "When automaticPronounPlan.context_request is true, use broader dialogue context and avoid hard-coding a risky pronoun; omit pronouns naturally if needed.\n"
         "Rows may also include speakerId such as speaker_001/speaker_002. Use speakerId only as a stable dialogue turn label; do not infer real names, gender, or relationships from it.\n"
-        "TRANSLATION_MEMORY may include movieSummary, currentScenes, characters, relationships, sceneRelationshipOverrides, pronounPlans, speakerCharacterMapping, knownNames, and previous translationMemory rows. Use it only to keep names, aliases, speaker continuity, scene meaning, and pronouns consistent.\n"
+        "TRANSLATION_MEMORY may include movieSummary, currentScenes, characters, characterGraph, relationshipFact rows, addressPatterns, sceneRelationshipOverrides, pronounPlans, speakerCharacterMapping, knownNames, and previous translationMemory rows. Use it only to keep names, aliases, speaker continuity, scene meaning, and pronouns consistent.\n"
         "Character and relationship memory is uncertain unless confidence is high. Do not invent gender, relationships, or real character names that are not present in the memory or dialogue.\n"
-        "Priority for Vietnamese pronouns: explicit relationshipRule, high-confidence automaticPronounPlan, scene relationship overrides, character defaults, confirmed context, dialogue context, then model inference last.\n"
+        "Rows include compact sourceProtection. Treat it as hard constraints: preserve numbers, units, durations, quantities, negation, question/command status, actions, and unit order. Never turn hours into years or negation into affirmation.\n"
+        "If sourceProtection.units has multiple items, translate them in order without changing their meaning. If sourceProtection.quality.confidence is low, stay conservative and do not invent corrected source text.\n"
+        "Priority for Vietnamese pronouns: current source evidence, explicit relationshipRule, verified relationshipFact/source context, high-confidence automaticPronounPlan/addressPatterns, scene overrides, confirmed dialogue context, recentAddressHistory style hints, then model inference last. surfaceRealizationSuggestion and previous Vietnamese translations are not semantic evidence.\n"
+        "Resolve first-person and second-person together as one speaker-listener social configuration. If listener or relationship is unknown, omit the Vietnamese pronoun when natural, or use neutral wording; do not guess anh/chị/em/chú/ông.\n"
         "For a relationshipRule, selfReference is what the CURRENT speaker calls themselves; addressTerm is what the CURRENT speaker calls the addressee.\n"
         "Never swap speaker and addressee pronouns.\n\n"
         "Use TRANSLATION_MEMORY to keep names, terms, scene context, and nearby pronoun patterns consistent. Do not translate memory rows again.\n\n"
@@ -338,6 +342,52 @@ def user_prompt_v4(
         chunk=chunk,
         context_after=context_after,
         hint=retry_note or None,
+        translation_memory=translation_memory,
+    )
+
+
+def system_prompt_v5(source_lang: str, target_lang: str) -> str:
+    base = system_prompt_v3(source_lang, target_lang)
+    if (target_lang or "").lower() != "vi":
+        return base
+    return (
+        base
+        + "\nPHASE 8 SEMANTIC REALIZATION:\n"
+        "- Preserve source meaning before naturalness or brevity.\n"
+        "- Treat relationship/address terms as semantic facts, not fixed Vietnamese words.\n"
+        "- Resolve speaker, listener, referent, possession, direct address, and third-person reference before choosing Vietnamese pronouns.\n"
+        "- Do not infer anh/chị/em/con/cháu/mẹ/bố/etc. without source or high-confidence memory evidence.\n"
+        "- Unknown speaker-listener relationship: prefer neutral wording such as tôi or explicit kinship descriptions; do not invent intimacy, age, hierarchy, or family facts.\n"
+        "- Relationship memory stores source facts and evidence. Previous Vietnamese translations are style hints only and must not override current source evidence.\n"
+        "- For high-risk rows, you may reason internally over 2-3 candidates, but return only the best JSON translation.\n"
+    )
+
+
+def user_prompt_v5(
+    *,
+    source_lang: str,
+    target_lang: str,
+    context_before: Iterable[dict],
+    chunk: Iterable[dict],
+    context_after: Iterable[dict],
+    hint: Optional[str] = None,
+    translation_memory: Optional[dict] = None,
+) -> str:
+    phase8_note = (
+        "Rows may include semanticRepresentation. It is source meaning, not a Vietnamese word map. "
+        "Use realizationGuidance to decide whether social pronouns are justified. "
+        "If ambiguityScore is high, preserve referents/possession/relationship with conservative Vietnamese instead of guessing.\n"
+        "Never learn new relationship facts from previous Vietnamese translations; use them only as weak style continuity.\n"
+        "If characterGraph.addressPatterns shows a high-confidence pair, keep social consistency unless current source, scene, or discourse role justifies a shift. Consistency must never override explicit source meaning.\n"
+    )
+    combined_hint = phase8_note if not hint else f"{phase8_note}\n{hint}"
+    return user_prompt_v4(
+        source_lang=source_lang,
+        target_lang=target_lang,
+        context_before=context_before,
+        chunk=chunk,
+        context_after=context_after,
+        hint=combined_hint,
         translation_memory=translation_memory,
     )
 
@@ -400,6 +450,22 @@ def render_chunk_messages(
                 ),
             ),
         ]
+    if prompt_version == TRANSLATION_PROMPT_V5:
+        return [
+            PromptMessage("system", system_prompt_v5(source_lang, target_lang)),
+            PromptMessage(
+                "user",
+                user_prompt_v5(
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    context_before=context_before,
+                    chunk=chunk,
+                    context_after=context_after,
+                    hint=hint,
+                    translation_memory=translation_memory,
+                ),
+            ),
+        ]
     return render_chunk_messages_v1(
         source_lang=source_lang,
         target_lang=target_lang,
@@ -416,6 +482,7 @@ def prompt_versions() -> list[str]:
         TRANSLATION_PROMPT_V2,
         TRANSLATION_PROMPT_V3,
         TRANSLATION_PROMPT_V4,
+        TRANSLATION_PROMPT_V5,
     ]
 
 

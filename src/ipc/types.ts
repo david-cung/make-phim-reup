@@ -382,6 +382,12 @@ export interface TranscribeSegment {
   text: string;
   speakerId?: string | null;
   speakerConfidence?: number | null;
+  rawText?: string | null;
+  normalizedText?: string | null;
+  sourceSegmentId?: string | null;
+  sourceSubSegmentId?: string | null;
+  sourceQuality?: Record<string, unknown> | null;
+  semanticFacts?: Record<string, unknown> | null;
   avgLogprob?: number | null;
   noSpeechProb?: number | null;
   words?: WhisperWord[] | null;
@@ -613,7 +619,7 @@ export function defaultTranslateOptions(
     model: "",
     sourceLanguage: "en",
     targetLanguage: "vi",
-    promptVersion: "translation_prompt_v4",
+    promptVersion: "translation_prompt_v5",
     chunkSize: 15,
     contextBefore: 5,
     contextAfter: 5,

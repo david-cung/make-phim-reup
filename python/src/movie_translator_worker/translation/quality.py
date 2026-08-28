@@ -20,6 +20,18 @@ from .models import (
     TranslationResult,
     ensure_translation_result,
 )
+from ..source_protection import (
+    source_protection_payload,
+    validate_translation_against_source,
+)
+from .semantic_realization import (
+    SEMANTIC_ERROR_CODES,
+    analyze_source_semantics,
+    compact_semantic_payload,
+    realization_critic_issues,
+    requires_deeper_reasoning,
+    source_has_contextual_terms,
+)
 
 SERIOUS_REASON_FLAGS = {
     "AMBIGUOUS_PRONOUN",
@@ -34,7 +46,7 @@ SERIOUS_REASON_FLAGS = {
     "POSSIBLE_HALLUCINATION",
     "POSSIBLE_CHARACTER_REFERENCE_CONFLICT",
     "POSSIBLE_GLOBAL_INCONSISTENCY",
-}
+}.union(SEMANTIC_ERROR_CODES)
 
 SEMANTIC_REVISION_FLAGS = {
     "POSSIBLE_MEANING_CHANGE",
@@ -64,6 +76,7 @@ def validate_result(
     return semantic_validate_result(
         segment_id=segment_id,
         source=source,
+        source_protection=None,
         result=result,
         memory=memory,
         options=options,
@@ -76,6 +89,7 @@ def semantic_validate_result(
     *,
     segment_id: int,
     source: str,
+    source_protection: dict | None = None,
     result: str | TranslationResult,
     memory: TranslationMemory,
     options: TranslateOptions,
@@ -88,6 +102,14 @@ def semantic_validate_result(
     confidence = parsed.metadata.confidence
     if confidence is None:
         confidence = infer_confidence(flags)
+    pronoun_plan = memory.pronoun_plan_for_segment(segment_id)
+    representation = analyze_source_semantics(
+        segment_id=segment_id,
+        source=source,
+        speaker_id=None,
+        listener_id=None,
+        pronoun_plan=pronoun_plan,
+    )
 
     if suspicious_pronoun_shift(
         segment_id=segment_id,
@@ -98,7 +120,7 @@ def semantic_validate_result(
     flags.extend(
         validate_pronoun_plan(
             translation=parsed.translation,
-            plan=memory.pronoun_plan_for_segment(segment_id),
+            plan=pronoun_plan,
         )
     )
     if should_validate_semantically(
@@ -111,10 +133,12 @@ def semantic_validate_result(
             semantic_issues(
                 segment_id=segment_id,
                 source=source,
+                source_protection=source_protection,
                 translation=parsed.translation,
                 memory=memory,
                 context_before=context_before,
                 context_after=context_after,
+                representation=representation,
             )
         )
     flags = list(dict.fromkeys(flags))
@@ -150,6 +174,20 @@ def semantic_validate_result(
             "finalConfidence": final_confidence,
             "issues": list(dict.fromkeys(validation_issues)),
             "sourceLength": len(source.strip()),
+            "sourceProtection": source_protection
+            or source_protection_payload(segment_id=segment_id, text=source),
+            "semanticRepresentation": compact_semantic_payload(representation),
+            "ambiguityScore": representation.ambiguity_score,
+            "addressResolution": memory.address_debug_for_segment(segment_id),
+            "semanticCritic": {
+                "checked": should_validate_semantically(
+                    parsed,
+                    memory=memory,
+                    segment_id=segment_id,
+                    source=source,
+                ),
+                "errorTaxonomy": sorted(SEMANTIC_ERROR_CODES),
+            },
             "revisionAttempt": revision_attempt,
             "checked": should_validate_semantically(
                 parsed,
@@ -219,7 +257,18 @@ def should_validate_semantically(
     plan = memory.pronoun_plan_for_segment(segment_id)
     if plan is not None and plan.confidence >= PRONOUN_PLAN_ENFORCE_THRESHOLD:
         return True
+    representation = analyze_source_semantics(
+        segment_id=segment_id,
+        source=source,
+        pronoun_plan=plan,
+    )
+    if requires_deeper_reasoning(representation):
+        return True
     if _SOURCE_NEGATION_RE.search(source):
+        return True
+    if _SOURCE_PROTECTED_FACT_RE.search(source):
+        return True
+    if source_has_contextual_terms(source):
         return True
     return bool(extract_name_mentions(source))
 
@@ -228,10 +277,12 @@ def semantic_issues(
     *,
     segment_id: int,
     source: str,
+    source_protection: dict | None = None,
     translation: str,
     memory: TranslationMemory,
     context_before: list[TranslatedSegment],
     context_after: list[TranslatedSegment],
+    representation=None,
 ) -> list[str]:
     base = TranslationResult(translation)
     if not should_validate_semantically(
@@ -242,6 +293,32 @@ def semantic_issues(
     ):
         return []
     issues: list[str] = []
+    protection = source_protection or source_protection_payload(
+        segment_id=segment_id,
+        text=source,
+    )
+    plan = memory.pronoun_plan_for_segment(segment_id)
+    if representation is None:
+        representation = analyze_source_semantics(
+            segment_id=segment_id,
+            source=source,
+            pronoun_plan=plan,
+        )
+    phase7_issues = validate_translation_against_source(
+        source=source,
+        translation=translation,
+        protection=protection,
+    )
+    phase7_map = {
+        "UNTRANSLATED_CHINESE": "POSSIBLE_MISSING_MEANING",
+        "NUMBER_MISMATCH": "POSSIBLE_MEANING_CHANGE",
+        "DURATION_MISMATCH": "POSSIBLE_MEANING_CHANGE",
+        "QUANTITY_MISMATCH": "POSSIBLE_MEANING_CHANGE",
+        "MISSING_NEGATION": "POSSIBLE_MEANING_CHANGE",
+        "QUESTION_CHANGED_TO_STATEMENT": "POSSIBLE_MEANING_CHANGE",
+        "MISSING_ACTION": "POSSIBLE_MISSING_MEANING",
+    }
+    issues.extend(phase7_map.get(issue, "POSSIBLE_MEANING_CHANGE") for issue in phase7_issues)
     if _contains_cjk(translation):
         issues.append("POSSIBLE_MISSING_MEANING")
     if _missing_negation(source, translation):
@@ -252,11 +329,28 @@ def semantic_issues(
         issues.append("POSSIBLE_HALLUCINATION")
     if _too_short_for_source(source, translation):
         issues.append("POSSIBLE_MISSING_MEANING")
+    issues.extend(
+        realization_critic_issues(
+            source=source,
+            translation=translation,
+            representation=representation,
+            pronoun_plan=plan,
+        )
+    )
+    issues.extend(
+        memory.address_consistency_issues(
+            segment_id=segment_id,
+            source=source,
+            translation=translation,
+        )
+    )
     return list(dict.fromkeys(issues))
 
 
 def validation_confidence_for(flags: Iterable[str]) -> float:
     flags = set(flags)
+    if flags.intersection(SEMANTIC_ERROR_CODES):
+        return 0.54
     if flags.intersection(
         {
             "POSSIBLE_MEANING_CHANGE",
@@ -380,6 +474,9 @@ _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac
 _SOURCE_NEGATION_RE = re.compile(
     r"(不|没|沒有|不是|不要|不能|别|無|未|never|not|no\b|don't|can't)",
     re.IGNORECASE,
+)
+_SOURCE_PROTECTED_FACT_RE = re.compile(
+    r"(\d|[零一二两三四五六七八九十百千万]+(?:个)?(?:小时|分钟|分鐘|年|个月|月|天|人|次|个)|面试|面試|介绍|介紹|结婚|結婚|等)"
 )
 _VI_NEGATION_WORDS = {
     "không",

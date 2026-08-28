@@ -23,6 +23,7 @@ from typing import Any, Optional
 from .. import logging as log
 from ..errors import RpcError, RpcErrorCode
 from ..rpc import HandlerContext
+from ..source_protection import source_protection_payload
 from . import prompts, registry
 from .llama_cpp_provider import LlamaCppTranslationProvider
 from .models import (
@@ -416,7 +417,7 @@ def _options_from_params(params: dict[str, Any]) -> TranslateOptions:
             model=model,
             source_language=str(opts.get("sourceLanguage") or "en"),
             target_language=str(opts.get("targetLanguage") or "vi"),
-            prompt_version=str(opts.get("promptVersion") or "translation_prompt_v4"),
+            prompt_version=str(opts.get("promptVersion") or "translation_prompt_v5"),
             chunk_size=int(opts.get("chunkSize", 15)),
             context_before=int(opts.get("contextBefore", 5)),
             context_after=int(opts.get("contextAfter", 5)),
@@ -448,10 +449,27 @@ def _load_segments(
             pronoun_context = item.get("pronounContext")
             speaker_id = item.get("speakerId")
             speaker_confidence = item.get("speakerConfidence")
+            raw_source_text = item.get("rawText")
+            normalized_source_text = item.get("normalizedText")
+            source_segment_id = item.get("sourceSegmentId")
+            source_sub_segment_id = item.get("sourceSubSegmentId")
+            source_quality = item.get("sourceQuality")
+            semantic_facts = item.get("semanticFacts")
         except (KeyError, TypeError, ValueError) as e:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, f"invalid segment: {e}") from e
         if sid in by_id:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, f"duplicate segment id: {sid}")
+        protection = source_protection_payload(
+            segment_id=source_segment_id if source_segment_id is not None else sid,
+            text=str(raw_source_text or normalized_source_text or text),
+            start=start,
+            end=end,
+        )
+        if isinstance(source_quality, dict):
+            protection["source_quality"] = dict(source_quality)
+            protection["sourceQuality"] = dict(source_quality)
+        if isinstance(semantic_facts, dict):
+            protection["semantic"] = dict(semantic_facts)
         by_id[sid] = TranslatedSegment(
             id=sid,
             source_text=text,
@@ -465,6 +483,23 @@ def _load_segments(
             speaker_confidence=float(speaker_confidence)
             if speaker_confidence is not None
             else None,
+            raw_source_text=str(raw_source_text) if raw_source_text is not None else None,
+            normalized_source_text=(
+                str(normalized_source_text)
+                if normalized_source_text is not None
+                else None
+            ),
+            source_segment_id=(
+                str(source_segment_id) if source_segment_id is not None else None
+            ),
+            source_sub_segment_id=(
+                str(source_sub_segment_id)
+                if source_sub_segment_id is not None
+                else None
+            ),
+            source_quality=dict(source_quality) if isinstance(source_quality, dict) else {},
+            semantic_facts=dict(semantic_facts) if isinstance(semantic_facts, dict) else {},
+            source_protection=protection,
         )
         order.append(sid)
     return by_id, order
@@ -520,6 +555,13 @@ def _apply_existing(
                     metadata=base.metadata,
                     speaker_id=base.speaker_id,
                     speaker_confidence=base.speaker_confidence,
+                    raw_source_text=base.raw_source_text,
+                    normalized_source_text=base.normalized_source_text,
+                    source_segment_id=base.source_segment_id,
+                    source_sub_segment_id=base.source_sub_segment_id,
+                    source_quality=base.source_quality,
+                    semantic_facts=base.semantic_facts,
+                    source_protection=base.source_protection,
                 )
             )
         else:

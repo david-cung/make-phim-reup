@@ -74,6 +74,13 @@ class TranslatedSegment:
     metadata: TranslationMetadata = field(default_factory=TranslationMetadata)
     speaker_id: Optional[str] = None
     speaker_confidence: Optional[float] = None
+    raw_source_text: Optional[str] = None
+    normalized_source_text: Optional[str] = None
+    source_segment_id: Optional[str] = None
+    source_sub_segment_id: Optional[str] = None
+    source_quality: dict[str, Any] = field(default_factory=dict)
+    semantic_facts: dict[str, Any] = field(default_factory=dict)
+    source_protection: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -103,7 +110,7 @@ class TranslateOptions:
     model: str
     source_language: str = "en"
     target_language: str = "vi"
-    prompt_version: str = "translation_prompt_v4"
+    prompt_version: str = "translation_prompt_v5"
     chunk_size: int = DEFAULT_TRANSLATION_BATCH_SIZE
     context_before: int = DEFAULT_CONTEXT_PREVIOUS_SEGMENTS
     context_after: int = DEFAULT_CONTEXT_NEXT_SEGMENTS
@@ -120,7 +127,7 @@ class TranslateOptions:
             model=self.model,
             source_language=(self.source_language or "").lower() or "en",
             target_language=(self.target_language or "").lower() or "vi",
-            prompt_version=self.prompt_version or "translation_prompt_v4",
+            prompt_version=self.prompt_version or "translation_prompt_v5",
             chunk_size=max(1, int(self.chunk_size)),
             context_before=max(0, int(self.context_before)),
             context_after=max(0, int(self.context_after)),
@@ -251,7 +258,7 @@ def build_cache_key(
     """
     opts = options.normalised()
     parts = [
-        "translation_v1",
+        "translation_v4_character_graph",
         transcript_cache_key or "",
         audio_hash or "",
         opts.source_language,
@@ -394,6 +401,13 @@ def merge_translations(
                     metadata=result.metadata,
                     speaker_id=seg.speaker_id,
                     speaker_confidence=seg.speaker_confidence,
+                    raw_source_text=seg.raw_source_text,
+                    normalized_source_text=seg.normalized_source_text,
+                    source_segment_id=seg.source_segment_id,
+                    source_sub_segment_id=seg.source_sub_segment_id,
+                    source_quality=seg.source_quality,
+                    semantic_facts=seg.semantic_facts,
+                    source_protection=seg.source_protection,
                 )
             )
         else:

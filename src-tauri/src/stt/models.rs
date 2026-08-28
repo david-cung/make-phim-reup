@@ -120,6 +120,18 @@ pub struct TranscribeSegment {
     pub speaker_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker_confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_segment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sub_segment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_quality: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_facts: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avg_logprob: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

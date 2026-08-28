@@ -48,7 +48,7 @@ fn vi() -> String {
     "vi".into()
 }
 fn default_prompt_version() -> String {
-    "translation_prompt_v4".into()
+    "translation_prompt_v5".into()
 }
 fn default_chunk_size() -> u32 {
     15

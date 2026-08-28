@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 from .. import logging as log
 from ..errors import RpcErrorCode
+from ..source_protection import source_protection_payload
 from .memory import TranslationMemory
 from .models import (
     TranslateOptions,
@@ -30,6 +31,7 @@ from .quality import (
     semantic_validate_result,
     select_best_candidate,
 )
+from .semantic_realization import analyze_source_semantics, compact_semantic_payload
 from .provider import (
     ProviderCancelled,
     ProviderError,
@@ -78,6 +80,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
             "translation_prompt_v2",
             "translation_prompt_v3",
             "translation_prompt_v4",
+            "translation_prompt_v5",
         ):
             raise ProviderError(
                 RpcErrorCode.TRANSLATE_UNKNOWN_PROMPT,
@@ -296,6 +299,22 @@ class LlamaCppTranslationProvider(TranslationProvider):
             memory=memory,
             hint=hint,
         )
+        if _messages_too_large(messages) and len(segment_ids) > 1:
+            out: dict[int, TranslationResult] = {}
+            for sid in segment_ids:
+                out.update(
+                    self._attempt_ids(
+                        llm=llm,
+                        chunk=chunk,
+                        segment_ids=[sid],
+                        segments_by_id=segments_by_id,
+                        options=options,
+                        temperature=temperature,
+                        memory=memory,
+                        hint=hint,
+                    )
+                )
+            return out
         raw = self._complete(
             llm=llm,
             messages=messages,
@@ -336,6 +355,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 "The translation must be Vietnamese in Latin script. "
                 "Do not output Chinese/Japanese/Korean characters. "
             )
+        protection = _compact_source_protection(seg)
         messages = [
             PromptMessage(
                 "system",
@@ -350,6 +370,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 (
                     f"Translate segment id {segment_id} to {tgt}.\n"
                     f"Source: {json.dumps(seg.source_text, ensure_ascii=False)}\n"
+                    f"Source protection: {json.dumps(protection, ensure_ascii=False)}\n"
                     f"Pronoun context: {json.dumps(seg.pronoun_context, ensure_ascii=False)}\n"
                     f'Return: {{"translations":[{{"id":{segment_id},"translated_text":"...","confidence":0.0,"reason_flags":[]}}]}}'
                 ),
@@ -532,6 +553,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
             if seg is None:
                 return {"id": seg_id, "text": ""}
             row = {"id": seg_id, "text": seg.source_text}
+            row["sourceProtection"] = _compact_source_protection(seg)
             if seg.speaker_id:
                 row["speakerId"] = seg.speaker_id
             if seg.speaker_confidence is not None:
@@ -542,9 +564,24 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 pronoun_plan = memory.pronoun_plan_for_segment(seg_id)
                 if pronoun_plan is not None:
                     row["automaticPronounPlan"] = pronoun_plan.to_dict()
+            else:
+                pronoun_plan = None
+            semantic = analyze_source_semantics(
+                segment_id=seg_id,
+                source=seg.source_text,
+                speaker_id=seg.speaker_id,
+                pronoun_plan=pronoun_plan,
+            )
+            semantic_payload = compact_semantic_payload(semantic)
+            if semantic_payload.get("terms") or semantic_payload.get("ambiguityScore", 0) >= 0.45:
+                row["semanticRepresentation"] = semantic_payload
             return row
 
-        return render_chunk_messages(
+        nearby_ids = chunk.context_before_ids + chunk.segment_ids + chunk.context_after_ids
+        memory_payload = (
+            memory.prompt_payload(nearby_ids) if memory is not None else None
+        )
+        messages = render_chunk_messages(
             prompt_version=options.prompt_version,
             source_lang=options.source_language,
             target_lang=options.target_language,
@@ -552,9 +589,19 @@ class LlamaCppTranslationProvider(TranslationProvider):
             chunk=[_row(i) for i in chunk.segment_ids],
             context_after=[_row(i) for i in chunk.context_after_ids],
             hint=hint,
-            translation_memory=(memory.prompt_payload(
-                chunk.context_before_ids + chunk.segment_ids + chunk.context_after_ids
-            ) if memory is not None else None),
+            translation_memory=memory_payload,
+        )
+        if not _messages_too_large(messages):
+            return messages
+        return render_chunk_messages(
+            prompt_version=options.prompt_version,
+            source_lang=options.source_language,
+            target_lang=options.target_language,
+            context_before=[],
+            chunk=[_row(i) for i in chunk.segment_ids],
+            context_after=[],
+            hint=hint,
+            translation_memory=_compact_translation_memory(memory_payload),
         )
 
     def _retry_low_confidence(
@@ -650,6 +697,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
             validated[sid] = semantic_validate_result(
                 segment_id=sid,
                 source=seg.source_text,
+                source_protection=seg.source_protection,
                 result=result,
                 memory=memory,
                 options=options,
@@ -1029,3 +1077,130 @@ def _revision_issue_summary(
         metadata = translations[sid].metadata
         out[sid] = list(metadata.validation.get("issues") or metadata.reason_flags)
     return out
+
+
+def _compact_source_protection(seg: TranslatedSegment) -> dict[str, Any]:
+    """Small prompt-safe view of Phase 7 source facts.
+
+    The full sourceProtection payload remains in validation metadata.
+    The LLM only needs the constraints that affect translation, so avoid
+    sending duplicate snake_case/camelCase keys or raw trace blobs here.
+    """
+    protection = seg.source_protection or source_protection_payload(
+        segment_id=seg.source_segment_id or seg.id,
+        text=seg.raw_source_text or seg.source_text,
+        start=seg.start,
+        end=seg.end,
+    )
+    semantic = protection.get("semantic") if isinstance(protection, dict) else {}
+    if not isinstance(semantic, dict):
+        semantic = {}
+    quality = (
+        protection.get("sourceQuality")
+        or protection.get("source_quality")
+        if isinstance(protection, dict)
+        else {}
+    )
+    if not isinstance(quality, dict):
+        quality = {}
+    logical = (
+        protection.get("logicalSubsegments")
+        or protection.get("logical_subsegments")
+        if isinstance(protection, dict)
+        else []
+    )
+    logical_rows = []
+    if isinstance(logical, list):
+        for item in logical[:6]:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("textCn") or item.get("text_cn")
+            if not text:
+                continue
+            logical_rows.append(
+                {
+                    "id": item.get("subSegmentId") or item.get("sub_segment_id"),
+                    "text": text,
+                }
+            )
+    actions = []
+    for action in semantic.get("actions") or []:
+        if isinstance(action, dict):
+            actions.append(
+                {
+                    "source": action.get("source"),
+                    "vi": action.get("viHint") or action.get("vi_hint"),
+                }
+            )
+    out: dict[str, Any] = {
+        "sourceId": seg.source_segment_id or str(seg.id),
+        "subId": seg.source_sub_segment_id,
+        "normalized": (
+            protection.get("normalizedSource")
+            or protection.get("normalized_source")
+            or seg.normalized_source_text
+            or seg.source_text
+        ),
+        "units": logical_rows,
+        "numbers": semantic.get("numbers") or [],
+        "negation": semantic.get("negation") or [],
+        "question": bool(semantic.get("isQuestion") or semantic.get("is_question")),
+        "command": bool(semantic.get("isCommand") or semantic.get("is_command")),
+        "actions": actions,
+        "quality": {
+            "confidence": quality.get("sourceConfidence")
+            or quality.get("source_confidence"),
+            "flags": quality.get("qualityFlags") or quality.get("quality_flags") or [],
+        },
+        "segmentationFlags": (
+            protection.get("segmentationFlags")
+            or protection.get("segmentation_flags")
+            or []
+        ),
+    }
+    return {key: value for key, value in out.items() if value not in (None, [], {}, "")}
+
+
+def _messages_too_large(messages: list[PromptMessage], *, max_chars: int = 24_000) -> bool:
+    # llama.cpp reports context in tokens; a conservative 3 chars/token
+    # keeps us below an 8192-token window even with JSON punctuation.
+    return sum(len(message.content) for message in messages) > max_chars
+
+
+def _compact_translation_memory(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    compact: dict[str, Any] = {}
+    if payload.get("movieSummary"):
+        compact["movieSummary"] = str(payload["movieSummary"])[:320]
+    if isinstance(payload.get("characters"), list):
+        compact["characters"] = payload["characters"][:6]
+    if isinstance(payload.get("relationships"), list):
+        compact["relationships"] = payload["relationships"][:8]
+    if isinstance(payload.get("sceneRelationshipOverrides"), list):
+        compact["sceneRelationshipOverrides"] = payload["sceneRelationshipOverrides"][:6]
+    if isinstance(payload.get("pronounPlans"), dict):
+        compact["pronounPlans"] = dict(list(payload["pronounPlans"].items())[:8])
+    if isinstance(payload.get("characterGraph"), dict):
+        graph = payload["characterGraph"]
+        compact["characterGraph"] = {
+            "characters": list(graph.get("characters") or [])[:6],
+            "relationshipFacts": list(graph.get("relationshipFacts") or [])[:8],
+            "addressPatterns": list(graph.get("addressPatterns") or [])[:8],
+            "contradictions": list(graph.get("contradictions") or [])[:4],
+            "recentAddressHistory": dict(
+                list(dict(graph.get("recentAddressHistory") or {}).items())[:6]
+            ),
+        }
+    tm = payload.get("translationMemory")
+    if isinstance(tm, dict):
+        compact["translationMemory"] = {
+            "translations": list(tm.get("translations") or [])[-6:],
+            "names": dict(list(dict(tm.get("names") or {}).items())[-8:]),
+            "pronounPatterns": list(tm.get("pronounPatterns") or [])[-4:],
+        }
+    elif isinstance(payload.get("translations"), list):
+        compact["translations"] = list(payload.get("translations") or [])[-6:]
+    if isinstance(payload.get("knownNames"), dict):
+        compact["knownNames"] = dict(list(payload["knownNames"].items())[:8])
+    return compact or None

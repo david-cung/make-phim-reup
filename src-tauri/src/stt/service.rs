@@ -661,7 +661,7 @@ pub fn build_cache_key(audio_hash: &str, options: &SttOptions) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let parts = [
-        "v2".to_string(),
+        "v3_source_reconstruction".to_string(),
         audio_hash.to_string(),
         options.model.clone(),
         options
@@ -716,6 +716,18 @@ fn parse_transcribe_response(
         #[serde(default)]
         speaker_confidence: Option<f64>,
         #[serde(default)]
+        raw_text: Option<String>,
+        #[serde(default)]
+        normalized_text: Option<String>,
+        #[serde(default)]
+        source_segment_id: Option<String>,
+        #[serde(default)]
+        source_sub_segment_id: Option<String>,
+        #[serde(default)]
+        source_quality: Option<Value>,
+        #[serde(default)]
+        semantic_facts: Option<Value>,
+        #[serde(default)]
         avg_logprob: Option<f64>,
         #[serde(default)]
         no_speech_prob: Option<f64>,
@@ -762,6 +774,12 @@ fn parse_transcribe_response(
             text: s.text,
             speaker_id: s.speaker_id,
             speaker_confidence: s.speaker_confidence,
+            raw_text: s.raw_text,
+            normalized_text: s.normalized_text,
+            source_segment_id: s.source_segment_id,
+            source_sub_segment_id: s.source_sub_segment_id,
+            source_quality: s.source_quality,
+            semantic_facts: s.semantic_facts,
             avg_logprob: s.avg_logprob,
             no_speech_prob: s.no_speech_prob,
             words: s.words.map(|words| {

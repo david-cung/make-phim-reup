@@ -24,10 +24,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Optional
+from dataclasses import replace
 
 from .. import logging as log
 from ..errors import RpcError, RpcErrorCode
 from ..rpc import HandlerContext
+from ..source_protection import (
+    semantic_analysis,
+    source_quality,
+    split_source_segment,
+)
 from . import registry
 from .device import default_device, detect_devices
 from .diarization import diarize_segments
@@ -171,6 +177,8 @@ def stt_transcribe(params: dict[str, Any], ctx: HandlerContext) -> dict[str, Any
     if options.resegment:
         on_progress(0.97, "segmenting", None)
         segments = resegment(segments)
+    on_progress(0.98, "normalizing_source", None)
+    segments = _reconstruct_source_segments(segments)
     on_progress(0.985, "diarizing", None)
     diarized = diarize_segments(audio_path, segments)
     segments = diarized.segments
@@ -353,6 +361,18 @@ def _segment_to_wire(s: Segment) -> dict[str, Any]:
         out["speakerId"] = s.speaker_id
     if s.speaker_confidence is not None:
         out["speakerConfidence"] = round(float(s.speaker_confidence), 4)
+    if s.raw_text is not None:
+        out["rawText"] = s.raw_text
+    if s.normalized_text is not None:
+        out["normalizedText"] = s.normalized_text
+    if s.source_segment_id is not None:
+        out["sourceSegmentId"] = s.source_segment_id
+    if s.source_sub_segment_id is not None:
+        out["sourceSubSegmentId"] = s.source_sub_segment_id
+    if s.source_quality is not None:
+        out["sourceQuality"] = s.source_quality
+    if s.semantic_facts is not None:
+        out["semanticFacts"] = s.semantic_facts
     if s.words:
         out["words"] = [
             {
@@ -363,6 +383,42 @@ def _segment_to_wire(s: Segment) -> dict[str, Any]:
             }
             for w in s.words
         ]
+    return out
+
+
+def _reconstruct_source_segments(segments: list[Segment]) -> list[Segment]:
+    """Normalize and conservatively split merged CJK dialogue units.
+
+    The resulting ids are re-numbered in display order while each row
+    keeps sourceSegmentId/sourceSubSegmentId/rawText for traceability.
+    """
+    out: list[Segment] = []
+    for seg in sorted(segments, key=lambda item: (item.start, item.end, item.id)):
+        units = split_source_segment(
+            segment_id=seg.id,
+            text=seg.text,
+            start=seg.start,
+            end=seg.end,
+        )
+        raw = seg.text
+        for unit in units:
+            text = unit.text_cn
+            out.append(
+                replace(
+                    seg,
+                    id=len(out),
+                    start=round(float(unit.start if unit.start is not None else seg.start), 3),
+                    end=round(float(unit.end if unit.end is not None else seg.end), 3),
+                    text=text,
+                    words=seg.words if len(units) == 1 else None,
+                    raw_text=raw,
+                    normalized_text=text,
+                    source_segment_id=unit.source_segment_id,
+                    source_sub_segment_id=unit.sub_segment_id,
+                    source_quality=source_quality(text, start=unit.start, end=unit.end),
+                    semantic_facts=semantic_analysis(text),
+                )
+            )
     return out
 
 

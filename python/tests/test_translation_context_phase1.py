@@ -132,13 +132,26 @@ class _Ctx:
         pass
 
 
+def _ids_in(rendered: str) -> list[int]:
+    if "CURRENT (translate these):" in rendered:
+        rendered = rendered.split("CURRENT (translate these):", 1)[1].split("\n\n", 1)[0]
+    found: list[int] = []
+    for token in rendered.replace(",", " ").replace(":", " ").split():
+        stripped = token.strip('"')
+        if stripped.isdigit():
+            value = int(stripped)
+            if value not in found:
+                found.append(value)
+    return found
+
+
 class _LowConfidenceThenGood:
     def __init__(self) -> None:
         self.calls: list[list[int]] = []
 
     def create_chat_completion(self, *, messages, **_kw):
         user = next(m["content"] for m in reversed(messages) if m["role"] == "user")
-        ids = [int(token) for token in user.replace(",", " ").replace(":", " ").split() if token.strip('"').isdigit()]
+        ids = _ids_in(user)
         self.calls.append(ids)
         if len(self.calls) == 1:
             confidence = 0.5
