@@ -459,8 +459,11 @@ def _load_segments(
             raise RpcError(RpcErrorCode.INVALID_PARAMS, f"invalid segment: {e}") from e
         if sid in by_id:
             raise RpcError(RpcErrorCode.INVALID_PARAMS, f"duplicate segment id: {sid}")
+        stable_source_segment_id = (
+            str(source_segment_id) if source_segment_id is not None else f"seg_{sid:05d}"
+        )
         protection = source_protection_payload(
-            segment_id=source_segment_id if source_segment_id is not None else sid,
+            segment_id=stable_source_segment_id,
             text=str(raw_source_text or normalized_source_text or text),
             start=start,
             end=end,
@@ -489,9 +492,7 @@ def _load_segments(
                 if normalized_source_text is not None
                 else None
             ),
-            source_segment_id=(
-                str(source_segment_id) if source_segment_id is not None else None
-            ),
+            source_segment_id=stable_source_segment_id,
             source_sub_segment_id=(
                 str(source_sub_segment_id)
                 if source_sub_segment_id is not None

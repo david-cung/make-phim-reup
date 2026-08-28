@@ -214,6 +214,10 @@ def system_prompt_v3(source_lang: str, target_lang: str) -> str:
         "- Do not add explanations, honorifics, or translator notes.\n"
         "- Never copy the source line as the translation unless the source is already in the target language.\n"
         "- Keep each line short enough to speak in the same time as the original.\n"
+        "- Preserve segment identity. Return exactly one translation object for each CURRENT id.\n"
+        "- Never combine two CURRENT rows into one translation. Never split one CURRENT row across several ids.\n"
+        "- Speaker boundaries are hard boundaries. Do not complete one speaker's unfinished sentence with another speaker's line.\n"
+        "- Rows marked contextOnly are read-only context and must not appear in output.\n"
         f"{extra}\n"
         "OUTPUT FORMAT:\n"
         "Return a single JSON object:\n"
@@ -296,6 +300,9 @@ def user_prompt_v3(
         "Character and relationship memory is uncertain unless confidence is high. Do not invent gender, relationships, or real character names that are not present in the memory or dialogue.\n"
         "Rows include compact sourceProtection. Treat it as hard constraints: preserve numbers, units, durations, quantities, negation, question/command status, actions, and unit order. Never turn hours into years or negation into affirmation.\n"
         "If sourceProtection.units has multiple items, translate them in order without changing their meaning. If sourceProtection.quality.confidence is low, stay conservative and do not invent corrected source text.\n"
+        "Rows include segmentId/sourceSegmentId/start/end/speakerId/contextOnly. Use PREVIOUS and NEXT only as read-only context. Translate only CURRENT rows where contextOnly is false.\n"
+        "Return exactly one object per CURRENT id. Do not omit, duplicate, rename, reorder, combine, or split ids. Preserve unfinished utterances as unfinished when the source is unfinished.\n"
+        "If speakerId changes between adjacent rows, never merge their meaning into one subtitle, even if one line answers or interrupts the other.\n"
         "Priority for Vietnamese pronouns: current source evidence, explicit relationshipRule, verified relationshipFact/source context, high-confidence automaticPronounPlan/addressPatterns, scene overrides, confirmed dialogue context, recentAddressHistory style hints, then model inference last. surfaceRealizationSuggestion and previous Vietnamese translations are not semantic evidence.\n"
         "Resolve first-person and second-person together as one speaker-listener social configuration. If listener or relationship is unknown, omit the Vietnamese pronoun when natural, or use neutral wording; do not guess anh/chị/em/chú/ông.\n"
         "For a relationshipRule, selfReference is what the CURRENT speaker calls themselves; addressTerm is what the CURRENT speaker calls the addressee.\n"
@@ -360,6 +367,7 @@ def system_prompt_v5(source_lang: str, target_lang: str) -> str:
         "- Unknown speaker-listener relationship: prefer neutral wording such as tôi or explicit kinship descriptions; do not invent intimacy, age, hierarchy, or family facts.\n"
         "- Relationship memory stores source facts and evidence. Previous Vietnamese translations are style hints only and must not override current source evidence.\n"
         "- For high-risk rows, you may reason internally over 2-3 candidates, but return only the best JSON translation.\n"
+        "- Candidate alternatives are internal only. Never output slash-separated alternatives, Option A/B/C, commentary, or multiple translations for one id.\n"
     )
 
 

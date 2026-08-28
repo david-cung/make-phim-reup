@@ -19,6 +19,8 @@ from typing import Iterable, Optional
 
 from .models import Segment, Word
 
+_UNKNOWN_SPEAKER = "UNKNOWN"
+
 _SENTENCE_END = re.compile(r"[.!?…。！？]+$")
 _SOFT_BREAK = re.compile(r"[,;:，、]$")
 _WHITESPACE = re.compile(r"\s+")
@@ -53,9 +55,12 @@ def resegment(segments: Iterable[Segment], settings: Optional[SegmenterSettings]
     timing of the original cue — never a fixed wall-clock grid.
     """
     cfg = settings or SegmenterSettings()
-    words = _flatten_words(segments)
+    source_segments = list(segments)
+    if not any(seg.words for seg in source_segments):
+        return _resegment_without_words(source_segments, cfg)
+    words = _flatten_words(source_segments)
     if not words:
-        return _resegment_without_words(list(segments), cfg)
+        return _resegment_without_words(source_segments, cfg)
     return _cues_from_words(words, cfg)
 
 
@@ -153,7 +158,7 @@ def _resegment_without_words(segments: list[Segment], cfg: SegmenterSettings) ->
             continue
         if not merged:
             merged.append(
-                Segment(id=0, start=seg.start, end=seg.end, text=text, words=None)
+                _copy_segment_with(seg, id=0, text=text, words=None)
             )
             continue
         prev = merged[-1]
@@ -162,6 +167,7 @@ def _resegment_without_words(segments: list[Segment], cfg: SegmenterSettings) ->
         duration = seg.end - prev.start
         if (
             gap <= 0.35
+            and _can_merge_segments(prev, seg)
             and not _SENTENCE_END.search(prev.text.rstrip())
             and len(combined) <= cfg.max_chars
             and duration <= cfg.max_duration
@@ -172,10 +178,17 @@ def _resegment_without_words(segments: list[Segment], cfg: SegmenterSettings) ->
                 end=seg.end,
                 text=combined,
                 words=None,
+                speaker_id=prev.speaker_id,
+                speaker_confidence=prev.speaker_confidence,
+                raw_text=_join_text(prev.raw_text or prev.text, seg.raw_text or seg.text),
+                normalized_text=combined,
+                source_segment_id=prev.source_segment_id,
+                source_quality=prev.source_quality,
+                semantic_facts=prev.semantic_facts,
             )
         else:
             merged.append(
-                Segment(id=len(merged), start=seg.start, end=seg.end, text=text, words=None)
+                _copy_segment_with(seg, id=len(merged), text=text, words=None)
             )
 
     split: list[Segment] = []
@@ -183,7 +196,7 @@ def _resegment_without_words(segments: list[Segment], cfg: SegmenterSettings) ->
         pieces = _split_long_text(seg.text, cfg)
         if len(pieces) == 1:
             split.append(
-                Segment(id=len(split), start=seg.start, end=seg.end, text=pieces[0], words=None)
+                _copy_segment_with(seg, id=len(split), text=pieces[0], words=None)
             )
             continue
         total_chars = sum(max(1, len(p)) for p in pieces)
@@ -193,7 +206,14 @@ def _resegment_without_words(segments: list[Segment], cfg: SegmenterSettings) ->
             share = span * (len(piece) / total_chars)
             end = seg.end if i == len(pieces) - 1 else cursor + share
             split.append(
-                Segment(id=len(split), start=round(cursor, 3), end=round(end, 3), text=piece, words=None)
+                _copy_segment_with(
+                    seg,
+                    id=len(split),
+                    start=round(cursor, 3),
+                    end=round(end, 3),
+                    text=piece,
+                    words=None,
+                )
             )
             cursor = end
     return _merge_tiny(split, cfg)
@@ -257,6 +277,7 @@ def _merge_tiny(cues: list[Segment], cfg: SegmenterSettings) -> list[Segment]:
         if (
             out
             and (cue.end - cue.start) < cfg.min_duration
+            and _can_merge_segments(out[-1], cue)
             and len(_join_words(out[-1].words) if out[-1].words else out[-1].text)
             + 1
             + len(cue.text)
@@ -273,6 +294,13 @@ def _merge_tiny(cues: list[Segment], cfg: SegmenterSettings) -> list[Segment]:
                 end=cue.end,
                 text=_join_text(prev.text, cue.text),
                 words=words,
+                speaker_id=prev.speaker_id,
+                speaker_confidence=prev.speaker_confidence,
+                raw_text=_join_text(prev.raw_text or prev.text, cue.raw_text or cue.text),
+                normalized_text=_join_text(prev.normalized_text or prev.text, cue.normalized_text or cue.text),
+                source_segment_id=prev.source_segment_id,
+                source_quality=prev.source_quality,
+                semantic_facts=prev.semantic_facts,
             )
         else:
             out.append(cue)
@@ -285,6 +313,14 @@ def _merge_tiny(cues: list[Segment], cfg: SegmenterSettings) -> list[Segment]:
             avg_logprob=cue.avg_logprob,
             no_speech_prob=cue.no_speech_prob,
             words=cue.words,
+            speaker_id=cue.speaker_id,
+            speaker_confidence=cue.speaker_confidence,
+            raw_text=cue.raw_text,
+            normalized_text=cue.normalized_text,
+            source_segment_id=cue.source_segment_id,
+            source_sub_segment_id=cue.source_sub_segment_id,
+            source_quality=cue.source_quality,
+            semantic_facts=cue.semantic_facts,
         )
     return out
 
@@ -306,3 +342,48 @@ def _join_words(words: Iterable[Word]) -> str:
 
 def _join_text(left: str, right: str) -> str:
     return _WHITESPACE.sub(" ", f"{left} {right}").strip()
+
+
+def _copy_segment_with(
+    seg: Segment,
+    *,
+    id: int,
+    text: str,
+    words: list[Word] | None,
+    start: float | None = None,
+    end: float | None = None,
+) -> Segment:
+    return Segment(
+        id=id,
+        start=seg.start if start is None else start,
+        end=seg.end if end is None else end,
+        text=text,
+        avg_logprob=seg.avg_logprob,
+        no_speech_prob=seg.no_speech_prob,
+        words=words,
+        speaker_id=seg.speaker_id,
+        speaker_confidence=seg.speaker_confidence,
+        raw_text=seg.raw_text,
+        normalized_text=seg.normalized_text,
+        source_segment_id=seg.source_segment_id,
+        source_sub_segment_id=seg.source_sub_segment_id,
+        source_quality=seg.source_quality,
+        semantic_facts=seg.semantic_facts,
+    )
+
+
+def _speaker_key(seg: Segment) -> str:
+    speaker = (seg.speaker_id or "").strip()
+    return speaker if speaker else _UNKNOWN_SPEAKER
+
+
+def _can_merge_segments(left: Segment, right: Segment) -> bool:
+    if not (left.speaker_id or "").strip() and not (right.speaker_id or "").strip():
+        return True
+    left_speaker = _speaker_key(left)
+    right_speaker = _speaker_key(right)
+    if left_speaker == _UNKNOWN_SPEAKER and right_speaker == _UNKNOWN_SPEAKER:
+        return False
+    if left_speaker == _UNKNOWN_SPEAKER or right_speaker == _UNKNOWN_SPEAKER:
+        return False
+    return left_speaker == right_speaker

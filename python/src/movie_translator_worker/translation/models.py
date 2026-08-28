@@ -422,8 +422,9 @@ def merge_translations(
 
 
 def _segment_to_dict(s: TranslatedSegment) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "id": s.id,
+        "segmentId": s.source_segment_id or f"seg_{s.id:05d}",
         "sourceText": s.source_text,
         "translation": s.translation,
         "dubbing": s.dubbing or s.translation,
@@ -432,6 +433,27 @@ def _segment_to_dict(s: TranslatedSegment) -> dict[str, Any]:
         "edited": bool(s.edited),
         "translationMetadata": s.metadata.to_dict(),
     }
+    if s.speaker_id:
+        d["speakerId"] = s.speaker_id
+    if s.speaker_confidence is not None:
+        d["speakerConfidence"] = round(float(s.speaker_confidence), 4)
+    if s.raw_source_text is not None:
+        d["rawText"] = s.raw_source_text
+    if s.normalized_source_text is not None:
+        d["normalizedText"] = s.normalized_source_text
+    if s.source_segment_id is not None:
+        d["sourceSegmentId"] = s.source_segment_id
+    if s.source_sub_segment_id is not None:
+        d["sourceSubSegmentId"] = s.source_sub_segment_id
+    if s.source_quality:
+        d["sourceQuality"] = s.source_quality
+    if s.semantic_facts:
+        d["semanticFacts"] = s.semantic_facts
+    if s.source_protection:
+        d["sourceProtection"] = s.source_protection
+    if s.pronoun_context:
+        d["pronounContext"] = s.pronoun_context
+    return d
 
 
 def _segment_from_dict(payload: Any) -> TranslatedSegment:
@@ -455,6 +477,42 @@ def _segment_from_dict(payload: Any) -> TranslatedSegment:
                 else None
             ),
             speaker_confidence=_opt_float(payload.get("speakerConfidence")),
+            raw_source_text=(
+                str(payload.get("rawText"))
+                if payload.get("rawText") is not None
+                else None
+            ),
+            normalized_source_text=(
+                str(payload.get("normalizedText"))
+                if payload.get("normalizedText") is not None
+                else None
+            ),
+            source_segment_id=(
+                str(payload.get("sourceSegmentId") or payload.get("segmentId"))
+                if payload.get("sourceSegmentId") is not None
+                or payload.get("segmentId") is not None
+                else None
+            ),
+            source_sub_segment_id=(
+                str(payload.get("sourceSubSegmentId"))
+                if payload.get("sourceSubSegmentId") is not None
+                else None
+            ),
+            source_quality=(
+                dict(payload.get("sourceQuality"))
+                if isinstance(payload.get("sourceQuality"), dict)
+                else {}
+            ),
+            semantic_facts=(
+                dict(payload.get("semanticFacts"))
+                if isinstance(payload.get("semanticFacts"), dict)
+                else {}
+            ),
+            source_protection=(
+                dict(payload.get("sourceProtection"))
+                if isinstance(payload.get("sourceProtection"), dict)
+                else {}
+            ),
         )
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError(f"invalid translated segment: {e}") from e

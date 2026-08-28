@@ -32,6 +32,11 @@ from .semantic_realization import (
     requires_deeper_reasoning,
     source_has_contextual_terms,
 )
+from .integrity import (
+    INTEGRITY_ERROR_CODES,
+    duplicate_translation_issues,
+    validate_vietnamese_output,
+)
 
 SERIOUS_REASON_FLAGS = {
     "AMBIGUOUS_PRONOUN",
@@ -47,6 +52,7 @@ SERIOUS_REASON_FLAGS = {
     "POSSIBLE_CHARACTER_REFERENCE_CONFLICT",
     "POSSIBLE_GLOBAL_INCONSISTENCY",
 }.union(SEMANTIC_ERROR_CODES)
+SERIOUS_REASON_FLAGS = SERIOUS_REASON_FLAGS.union(INTEGRITY_ERROR_CODES)
 
 SEMANTIC_REVISION_FLAGS = {
     "POSSIBLE_MEANING_CHANGE",
@@ -117,6 +123,8 @@ def semantic_validate_result(
         memory=memory,
     ):
         flags.append("POSSIBLE_PRONOUN_INCONSISTENCY")
+    if (options.target_language or "").lower() == "vi":
+        flags.extend(validate_vietnamese_output(parsed.translation, source=source).errors)
     flags.extend(
         validate_pronoun_plan(
             translation=parsed.translation,
@@ -413,6 +421,8 @@ def global_consistency_issues(
     memory: TranslationMemory,
 ) -> dict[int, list[str]]:
     issues: dict[int, list[str]] = {}
+    for sid, flags in duplicate_translation_issues(translations, segments_by_id).items():
+        issues.setdefault(sid, []).extend(flags)
     name_forms: dict[str, dict[str, list[int]]] = {}
     for sid, result in translations.items():
         seg = segments_by_id.get(sid)

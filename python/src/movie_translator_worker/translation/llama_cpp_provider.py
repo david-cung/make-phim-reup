@@ -31,6 +31,13 @@ from .quality import (
     semantic_validate_result,
     select_best_candidate,
 )
+from .integrity import (
+    invalid_translation_ids,
+    merge_metadata_validation,
+    normalized_speaker_id,
+    stable_segment_id,
+    validate_batch_integrity,
+)
 from .semantic_realization import analyze_source_semantics, compact_semantic_payload
 from .provider import (
     ProviderCancelled,
@@ -74,7 +81,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
         segments_by_id: dict[int, TranslatedSegment],
         options: TranslateOptions,
         ctx: TranslateContext,
-    ) -> dict[int, str]:
+    ) -> dict[int, TranslationResult]:
         if options.prompt_version not in (
             "translation_prompt_v1",
             "translation_prompt_v2",
@@ -136,7 +143,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
             translations.update(chunk_map)
             for sid, result in chunk_map.items():
                 seg = segments_by_id.get(sid)
-                if seg is not None:
+                if seg is not None and not result.metadata.needs_review:
                     memory.record(sid, seg.source_text, result)
             ctx.on_chunk_completed(chunk.chunk_index, chunk_map)
 
@@ -327,7 +334,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
             # Unparseable output — treat as "nothing came back" so the
             # escalation below can retry instead of killing the job.
             return {}
-        return _drop_wrong_language_outputs(
+        return _drop_invalid_outputs(
             translations,
             segment_ids=segment_ids,
             segments_by_id=segments_by_id,
@@ -386,7 +393,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
             translations = self._parse_response(raw, expected_ids=[segment_id], strict=False)
         except ProviderError:
             return {}
-        return _drop_wrong_language_outputs(
+        return _drop_invalid_outputs(
             translations,
             segment_ids=[segment_id],
             segments_by_id=segments_by_id,
@@ -548,14 +555,27 @@ class LlamaCppTranslationProvider(TranslationProvider):
         memory: TranslationMemory | None = None,
         hint: str | None = None,
     ) -> list[PromptMessage]:
-        def _row(seg_id: int) -> dict:
+        def _row(seg_id: int, *, context_only: bool = False) -> dict:
             seg = segments_by_id.get(seg_id)
             if seg is None:
-                return {"id": seg_id, "text": ""}
-            row = {"id": seg_id, "text": seg.source_text}
+                return {
+                    "id": seg_id,
+                    "segmentId": f"seg_{seg_id:05d}",
+                    "text": "",
+                    "contextOnly": context_only,
+                    "speakerId": "UNKNOWN",
+                }
+            row = {
+                "id": seg_id,
+                "segmentId": stable_segment_id(seg),
+                "sourceSegmentId": stable_segment_id(seg),
+                "text": seg.source_text,
+                "start": round(float(seg.start), 3),
+                "end": round(float(seg.end), 3),
+                "contextOnly": context_only,
+                "speakerId": normalized_speaker_id(seg.speaker_id),
+            }
             row["sourceProtection"] = _compact_source_protection(seg)
-            if seg.speaker_id:
-                row["speakerId"] = seg.speaker_id
             if seg.speaker_confidence is not None:
                 row["speakerConfidence"] = round(float(seg.speaker_confidence), 4)
             if seg.pronoun_context:
@@ -585,9 +605,9 @@ class LlamaCppTranslationProvider(TranslationProvider):
             prompt_version=options.prompt_version,
             source_lang=options.source_language,
             target_lang=options.target_language,
-            context_before=[_row(i) for i in chunk.context_before_ids],
+            context_before=[_row(i, context_only=True) for i in chunk.context_before_ids],
             chunk=[_row(i) for i in chunk.segment_ids],
-            context_after=[_row(i) for i in chunk.context_after_ids],
+            context_after=[_row(i, context_only=True) for i in chunk.context_after_ids],
             hint=hint,
             translation_memory=memory_payload,
         )
@@ -713,6 +733,18 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 ],
                 revision_attempt=result.metadata.retry_count,
             )
+        report = validate_batch_integrity(
+            expected_ids=chunk.segment_ids,
+            translations=validated,
+            segments_by_id=segments_by_id,
+            target_language=options.target_language,
+        )
+        for sid, errors in report.language_errors.items():
+            if sid in validated:
+                validated[sid] = merge_metadata_validation(validated[sid], errors=errors)
+        for sid, errors in report.alignment_warnings.items():
+            if sid in validated:
+                validated[sid] = merge_metadata_validation(validated[sid], errors=errors)
         return validated
 
     def _global_consistency_pass(
@@ -957,30 +989,43 @@ _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
-def _drop_wrong_language_outputs(
+def _drop_invalid_outputs(
     translations: dict[int, TranslationResult],
     *,
     segment_ids: list[int],
     segments_by_id: dict[int, TranslatedSegment],
     options: TranslateOptions,
 ) -> dict[int, TranslationResult]:
-    """Treat source-language copies as missing so the repair path retries.
+    """Treat structurally unsafe outputs as missing so repair retries.
 
     Small local models can obey the JSON shape while returning Chinese for
     Vietnamese targets. That is worse than an omitted segment because it
-    poisons the cache and TTS will voice the wrong language. Keep the
-    heuristic deliberately narrow: it only guards Vietnamese targets from
-    CJK-heavy output or near-verbatim source copies.
+    poisons the cache and TTS will voice the wrong language. Phase 8.0.1
+    extends this guard to candidate leakage and neighbor drift while
+    preserving the same local-repair behavior.
     """
-    if (options.target_language or "").lower() != "vi":
-        return translations
-
+    report = validate_batch_integrity(
+        expected_ids=segment_ids,
+        translations=translations,
+        segments_by_id=segments_by_id,
+        target_language=options.target_language,
+    )
+    invalid_ids = set(invalid_translation_ids(report))
     filtered: dict[int, TranslationResult] = {}
     for sid in segment_ids:
         result = translations.get(sid)
         text = result.translation if result is not None else ""
         source = segments_by_id.get(sid).source_text if sid in segments_by_id else ""
         if not text:
+            continue
+        if sid in invalid_ids:
+            issues = report.language_errors.get(sid, []) + report.alignment_warnings.get(sid, [])
+            log.warn(
+                "translation output failed integrity check; retrying",
+                segment=sid,
+                target=options.target_language,
+                issues=issues,
+            )
             continue
         if _looks_like_bad_vietnamese_translation(source, text):
             log.warn(
