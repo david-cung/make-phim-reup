@@ -12,11 +12,28 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..source_protection import (
+    semantic_analysis as source_semantic_analysis,
+    validate_translation_against_source,
+)
 from .memory import PRONOUN_PLAN_ENFORCE_THRESHOLD, PronounPlan
 
 
 SEMANTIC_ERROR_CODES = {
+    "SPEECH_ACT_ERROR",
+    "STATEMENT_TO_QUESTION_ERROR",
+    "QUESTION_TO_STATEMENT_ERROR",
+    "QUESTION_TYPE_ERROR",
+    "NUMERIC_FIDELITY_ERROR",
+    "POLARITY_ERROR",
+    "PREDICATE_ERROR",
     "REFERENT_ERROR",
+    "ENTITY_ERROR",
+    "RELATIONSHIP_ERROR",
+    "CERTAINTY_ERROR",
+    "TONE_OVERINTERPRETATION",
+    "TRANSLATOR_COMMENTARY_LEAK",
+    "UNSUPPORTED_PARTICLE_INSERTION",
     "RELATIONSHIP_REALIZATION_ERROR",
     "POSSESSION_ERROR",
     "DIRECT_ADDRESS_ERROR",
@@ -73,6 +90,17 @@ class SourceSemanticRepresentation:
     source_text: str
     speaker_id: str | None = None
     listener_id: str | None = None
+    speech_act: str = "STATEMENT"
+    question_type: str | None = None
+    polarity: str = "positive"
+    predicate: str | None = None
+    events: list[str] = field(default_factory=list)
+    numeric_anchors: list[dict[str, Any]] = field(default_factory=list)
+    certainty: str = "certain"
+    aspect: str | None = None
+    source_particles: list[dict[str, Any]] = field(default_factory=list)
+    naturalization_budget: str = "LEVEL_1_2"
+    must_preserve: list[str] = field(default_factory=list)
     entities: dict[str, Any] = field(default_factory=dict)
     propositions: list[dict[str, Any]] = field(default_factory=list)
     terms: list[SemanticTerm] = field(default_factory=list)
@@ -86,6 +114,17 @@ class SourceSemanticRepresentation:
             "segmentId": self.segment_id,
             "speakerId": self.speaker_id,
             "listenerId": self.listener_id,
+            "speechAct": self.speech_act,
+            "questionType": self.question_type,
+            "polarity": self.polarity,
+            "predicate": self.predicate,
+            "events": list(self.events),
+            "numericAnchors": list(self.numeric_anchors),
+            "certainty": self.certainty,
+            "aspect": self.aspect,
+            "sourceParticles": list(self.source_particles),
+            "naturalizationBudget": self.naturalization_budget,
+            "mustPreserve": list(self.must_preserve),
             "entities": dict(self.entities),
             "propositions": list(self.propositions),
             "terms": [term.to_dict() for term in self.terms],
@@ -207,6 +246,7 @@ def analyze_source_semantics(
     pronoun_plan: PronounPlan | None = None,
 ) -> SourceSemanticRepresentation:
     normalized = _normalize_source(source)
+    source_facts = source_semantic_analysis(normalized)
     terms = _extract_terms(normalized)
     listener = _resolved_listener(listener_id, pronoun_plan)
     entities: dict[str, Any] = {
@@ -272,12 +312,52 @@ def analyze_source_semantics(
         terms=terms,
         pronoun_plan=pronoun_plan,
         unresolved=unresolved,
+        source_facts=source_facts,
     )
     return SourceSemanticRepresentation(
         segment_id=segment_id,
         source_text=normalized,
         speaker_id=speaker_id or (pronoun_plan.speaker if pronoun_plan else None),
         listener_id=listener,
+        speech_act=str(source_facts.get("speechAct") or source_facts.get("speech_act") or "STATEMENT"),
+        question_type=(
+            str(source_facts.get("questionType") or source_facts.get("question_type"))
+            if source_facts.get("questionType") or source_facts.get("question_type")
+            else None
+        ),
+        polarity=str(source_facts.get("polarity") or "positive"),
+        predicate=(
+            str(source_facts.get("predicate"))
+            if source_facts.get("predicate")
+            else None
+        ),
+        events=[
+            str(event)
+            for event in (source_facts.get("events") or [])
+            if str(event).strip()
+        ],
+        numeric_anchors=[
+            dict(item)
+            for item in (source_facts.get("numbers") or [])
+            if isinstance(item, dict)
+        ],
+        certainty=str(source_facts.get("certainty") or "certain"),
+        aspect=(
+            str(source_facts.get("aspect"))
+            if source_facts.get("aspect")
+            else None
+        ),
+        source_particles=[
+            dict(item)
+            for item in (source_facts.get("sourceParticles") or source_facts.get("source_particles") or [])
+            if isinstance(item, dict)
+        ],
+        naturalization_budget=str(source_facts.get("naturalizationBudget") or "LEVEL_1_2"),
+        must_preserve=[
+            str(item)
+            for item in (source_facts.get("mustPreserve") or source_facts.get("must_preserve") or [])
+            if str(item).strip()
+        ],
         entities=entities,
         propositions=propositions,
         terms=terms,
@@ -314,6 +394,13 @@ def realization_critic_issues(
 
     if not translation.strip():
         return ["SEMANTIC_OMISSION"]
+
+    source_guard_issues = validate_translation_against_source(
+        source=source,
+        translation=translation,
+        protection={"semantic": _representation_semantic_payload(representation)},
+    )
+    issues.extend(issue for issue in source_guard_issues if issue in SEMANTIC_ERROR_CODES)
 
     enforced = _has_enforced_plan(pronoun_plan)
     has_terms = bool(representation.terms)
@@ -353,6 +440,25 @@ def realization_critic_issues(
         issues.extend(_enforced_plan_issues(normalized_vi, pronoun_plan))
 
     return list(dict.fromkeys(issues))
+
+
+def _representation_semantic_payload(representation: SourceSemanticRepresentation) -> dict[str, Any]:
+    return {
+        "speechAct": representation.speech_act,
+        "speech_act": representation.speech_act,
+        "questionType": representation.question_type,
+        "question_type": representation.question_type,
+        "polarity": representation.polarity,
+        "predicate": representation.predicate,
+        "events": list(representation.events),
+        "numbers": list(representation.numeric_anchors),
+        "certainty": representation.certainty,
+        "aspect": representation.aspect,
+        "sourceParticles": list(representation.source_particles),
+        "source_particles": list(representation.source_particles),
+        "mustPreserve": list(representation.must_preserve),
+        "must_preserve": list(representation.must_preserve),
+    }
 
 
 def semantic_categories_for_terms(text: str) -> list[dict[str, Any]]:
@@ -445,11 +551,20 @@ def _realization_guidance(
     terms: list[SemanticTerm],
     pronoun_plan: PronounPlan | None,
     unresolved: list[str],
+    source_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     enforced = _has_enforced_plan(pronoun_plan)
+    source_facts = source_facts or {}
     return {
         "layer": "vietnamese_social_realization",
         "preserveSourceMeaningFirst": True,
+        "speechActMustBePreserved": source_facts.get("speechAct") or source_facts.get("speech_act"),
+        "questionTypeMustBePreserved": source_facts.get("questionType") or source_facts.get("question_type"),
+        "numericAnchorsMustBePreserved": bool(source_facts.get("numbers")),
+        "polarityMustBePreserved": source_facts.get("polarity"),
+        "predicateMustBePreserved": source_facts.get("predicate"),
+        "sourceParticlesAreNotVietnameseMappings": True,
+        "naturalizationBudget": source_facts.get("naturalizationBudget") or source_facts.get("naturalization_budget"),
         "discourseRole": discourse_role,
         "termCategories": list(dict.fromkeys(term.category for term in terms)),
         "relationshipTermsAreFactsNotSurfaceWords": True,

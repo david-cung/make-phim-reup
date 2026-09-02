@@ -258,7 +258,7 @@ def build_cache_key(
     """
     opts = options.normalised()
     parts = [
-        "translation_v4_character_graph",
+        "translation_v5_semantic_fidelity",
         transcript_cache_key or "",
         audio_hash or "",
         opts.source_language,

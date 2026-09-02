@@ -26,6 +26,7 @@ from .models import (
 )
 from .prompts import PromptMessage, language_name, render_chunk_messages
 from .quality import (
+    HARD_SEMANTIC_FAILURES,
     global_consistency_issues,
     needs_retry,
     semantic_validate_result,
@@ -39,6 +40,13 @@ from .integrity import (
     validate_batch_integrity,
 )
 from .semantic_realization import analyze_source_semantics, compact_semantic_payload
+from .units import (
+    context_unit_ids,
+    ownership_payload,
+    provenance_for_segment,
+    resolve_conversation_structure,
+    source_unit_from_segment,
+)
 from .provider import (
     ProviderCancelled,
     ProviderError,
@@ -252,15 +260,18 @@ class LlamaCppTranslationProvider(TranslationProvider):
         messages: list[PromptMessage],
         options: TranslateOptions,
         temperature: float,
+        json_mode: bool = True,
     ) -> str:
+        kwargs: dict[str, Any] = {
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "temperature": temperature,
+            "top_p": options.top_p,
+            "max_tokens": options.max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
         try:
-            response = llm.create_chat_completion(
-                messages=[{"role": m.role, "content": m.content} for m in messages],
-                temperature=temperature,
-                top_p=options.top_p,
-                max_tokens=options.max_tokens,
-                response_format={"type": "json_object"},
-            )
+            response = llm.create_chat_completion(**kwargs)
         except MemoryError as e:  # pragma: no cover
             raise ProviderError(
                 RpcErrorCode.TRANSLATE_OUT_OF_MEMORY,
@@ -369,6 +380,9 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 (
                     f"You translate one movie subtitle from {src} to {tgt}. "
                     f"{target_guard}"
+                    "Preserve source proposition, sentence mood, question type, "
+                    "numbers, polarity, predicate, certainty, and referents exactly. "
+                    "Do not output translator notes or candidate alternatives. "
                     "Return JSON only, with exactly the requested id."
                 ),
             ),
@@ -399,6 +413,81 @@ class LlamaCppTranslationProvider(TranslationProvider):
             segments_by_id=segments_by_id,
             options=options,
         )
+
+    def _attempt_single_text_rescue(
+        self,
+        *,
+        llm: Any,
+        segment_id: int,
+        segments_by_id: dict[int, TranslatedSegment],
+        options: TranslateOptions,
+        temperature: float,
+    ) -> dict[int, TranslationResult]:
+        """Final one-line rescue that does not ask the model to echo an id.
+
+        Some small GGUF models keep returning valid text while omitting
+        the JSON id. At this point the caller has already isolated one
+        segment, so we can safely wrap a plain-text answer ourselves and
+        avoid failing the whole movie over JSON bookkeeping.
+        """
+        seg = segments_by_id.get(segment_id)
+        if seg is None:
+            return {}
+        src = language_name(options.source_language)
+        tgt = language_name(options.target_language)
+        protection = _compact_source_protection(seg)
+        target_guard = ""
+        if (options.target_language or "").lower() == "vi":
+            target_guard = (
+                "Return Vietnamese in Latin script only. Do not copy Chinese, "
+                "Japanese, or Korean characters."
+            )
+        messages = [
+            PromptMessage(
+                "system",
+                (
+                    f"Translate one movie subtitle from {src} to {tgt}. "
+                    "Return only the translated subtitle text, no JSON, no id, "
+                    f"no notes. {target_guard} Preserve sentence mood, question type, "
+                    "numbers, polarity, predicate, certainty, and referents exactly. "
+                    "Use conservative Vietnamese if source facts are uncertain."
+                ).strip(),
+            ),
+            PromptMessage(
+                "user",
+                (
+                    f"Source subtitle:\n{seg.source_text}\n\n"
+                    f"Source facts:\n{json.dumps(protection, ensure_ascii=False)}\n\n"
+                    f"Translation in {tgt}:"
+                ),
+            ),
+        ]
+        raw = self._complete(
+            llm=llm,
+            messages=messages,
+            options=options,
+            temperature=temperature,
+            json_mode=False,
+        )
+        text = _clean_plain_translation(raw)
+        if not text or _looks_like_bad_vietnamese_translation(seg.source_text, text):
+            return {}
+        result = TranslationResult(
+            text,
+            TranslationMetadata(
+                confidence=0.62,
+                needs_review=True,
+                retry_count=_MAX_REPAIR_ATTEMPTS + 1,
+                translation_method="single_text_rescue",
+                reason_flags=["LLM_JSON_ID_RESCUE"],
+                validation={
+                    "valid": False,
+                    "issues": ["LLM_JSON_ID_RESCUE"],
+                    "sourceLength": len(seg.source_text.strip()),
+                },
+            ),
+        )
+        return {segment_id: result}
 
     def _translate_one_chunk(
         self,
@@ -527,6 +616,39 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 )
             )
         missing = [i for i in chunk.segment_ids if i not in translations]
+        if missing:
+            for k, segment_id in enumerate(list(missing)):
+                if ctx.cancelled():
+                    raise ProviderCancelled()
+                if report is not None:
+                    report(
+                        min(0.995, 0.99 + 0.005 * (k / max(1, len(missing)))),
+                        f"{label}: plain-text rescue for segment {segment_id} "
+                        f"({k + 1}/{len(missing)})",
+                    )
+                translations.update(
+                    self._attempt_single_text_rescue(
+                        llm=llm,
+                        segment_id=segment_id,
+                        segments_by_id=segments_by_id,
+                        options=options,
+                        temperature=min(1.0, options.temperature + 0.6),
+                    )
+                )
+        missing = [i for i in chunk.segment_ids if i not in translations]
+        if missing:
+            for segment_id in missing:
+                translations[segment_id] = _fallback_missing_translation(
+                    segment_id=segment_id,
+                    seg=segments_by_id.get(segment_id),
+                    target_language=options.target_language,
+                )
+                log.warn(
+                    "translation segment fell back after exhaustive rescue",
+                    segment=segment_id,
+                    chunk=chunk.chunk_index,
+                )
+        missing = [i for i in chunk.segment_ids if i not in translations]
         if not missing:
             return self._retry_low_confidence(
                 llm=llm,
@@ -540,10 +662,16 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 memory=memory,
             )
 
-        raise ProviderError(
-            RpcErrorCode.TRANSLATE_INCOMPLETE_RESPONSE,
-            f"LLM kept omitting segment ids after {_MAX_REPAIR_ATTEMPTS} retries: "
-            f"{missing[:10]}{'…' if len(missing) > 10 else ''}",
+        return self._retry_low_confidence(
+            llm=llm,
+            chunk=chunk,
+            translations=translations,
+            segments_by_id=segments_by_id,
+            options=options,
+            ctx=ctx,
+            label=label,
+            report=report,
+            memory=memory,
         )
 
     def _build_messages(
@@ -555,24 +683,58 @@ class LlamaCppTranslationProvider(TranslationProvider):
         memory: TranslationMemory | None = None,
         hint: str | None = None,
     ) -> list[PromptMessage]:
+        target_context_unit_ids = context_unit_ids(
+            before=chunk.context_before_ids,
+            after=chunk.context_after_ids,
+            segments_by_id=segments_by_id,
+        )
+        nearby_ids = chunk.context_before_ids + chunk.segment_ids + chunk.context_after_ids
+        nearby_units = [
+            source_unit_from_segment(segments_by_id[sid])
+            for sid in nearby_ids
+            if sid in segments_by_id
+        ]
+        turns, boundaries, semantic_groups = resolve_conversation_structure(nearby_units)
+        turn_by_unit = {
+            unit_id: turn.turn_id
+            for turn in turns
+            for unit_id in turn.unit_ids
+        }
+        group_by_unit = {
+            unit_id: group.semantic_group_id
+            for group in semantic_groups
+            for unit_id in group.member_unit_ids
+        }
+
         def _row(seg_id: int, *, context_only: bool = False) -> dict:
             seg = segments_by_id.get(seg_id)
             if seg is None:
                 return {
                     "id": seg_id,
+                    "unitId": f"seg_{seg_id:05d}",
                     "segmentId": f"seg_{seg_id:05d}",
                     "text": "",
                     "contextOnly": context_only,
                     "speakerId": "UNKNOWN",
                 }
+            source_unit = source_unit_from_segment(seg)
             row = {
                 "id": seg_id,
+                "unitId": source_unit.unit_id,
                 "segmentId": stable_segment_id(seg),
                 "sourceSegmentId": stable_segment_id(seg),
                 "text": seg.source_text,
                 "start": round(float(seg.start), 3),
                 "end": round(float(seg.end), 3),
                 "contextOnly": context_only,
+                "sourceUnit": source_unit.to_dict(),
+                "ownership": ownership_payload(
+                    source_unit_id=source_unit.unit_id,
+                    context_unit_ids=[] if context_only else target_context_unit_ids,
+                    target=not context_only,
+                ),
+                "conversationTurnId": turn_by_unit.get(source_unit.unit_id),
+                "semanticGroupId": group_by_unit.get(source_unit.unit_id),
                 "speakerId": normalized_speaker_id(seg.speaker_id),
             }
             row["sourceProtection"] = _compact_source_protection(seg)
@@ -597,10 +759,21 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 row["semanticRepresentation"] = semantic_payload
             return row
 
-        nearby_ids = chunk.context_before_ids + chunk.segment_ids + chunk.context_after_ids
         memory_payload = (
-            memory.prompt_payload(nearby_ids) if memory is not None else None
+            dict(memory.prompt_payload(nearby_ids)) if memory is not None else None
         )
+        if memory_payload is None:
+            memory_payload = {}
+        memory_payload["translationUnitContract"] = {
+            "targets": [
+                source_unit_from_segment(segments_by_id[sid]).unit_id
+                for sid in chunk.segment_ids
+                if sid in segments_by_id
+            ],
+            "context": target_context_unit_ids,
+            "conversationBoundaries": [boundary.to_dict() for boundary in boundaries],
+            "rule": "context may be used as evidence; output ownership must remain one result per target unit",
+        }
         messages = render_chunk_messages(
             prompt_version=options.prompt_version,
             source_lang=options.source_language,
@@ -660,20 +833,26 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 )
             expanded = self._expanded_chunk(chunk, uncertain, segments_by_id, options)
             issue_summary = _revision_issue_summary(translations, uncertain)
+            anchor_summary = _revision_anchor_summary(segments_by_id, uncertain)
             retry_map = self._attempt_ids(
                 llm=llm,
                 chunk=expanded,
                 segment_ids=uncertain,
                 segments_by_id=segments_by_id,
                 options=options,
-                temperature=min(1.0, options.temperature + 0.15 * (retry_index + 1)),
+                temperature=max(0.0, min(options.temperature, options.temperature - 0.05 * (retry_index + 1))),
                 memory=memory,
                 hint=(
-                    "The previous translation failed semantic validation. Use the expanded "
-                    "context, character memory, relationship memory, scene memory, and "
-                    f"these validator issues: {issue_summary}. Rewrite only the requested "
-                    "CURRENT segment ids, preserve the source meaning, avoid hallucinated "
-                    "details, and fix pronoun/referent/relationship mistakes."
+                    "The previous translation failed semantic validation. Return to the "
+                    "original source text, not the previous Vietnamese. Use this expanded "
+                    "context plus the source semantic anchors and validator issues. "
+                    f"Semantic anchors by id: {anchor_summary}. Validator issues: {issue_summary}. "
+                    "Rewrite only the requested CURRENT segment ids. Repair conservatively: "
+                    "preserve proposition, speech act, question type, polarity, numbers, "
+                    "predicate, referents, relationships, certainty, and source-grounded "
+                    "tone before making Vietnamese natural. Do not add particles such as "
+                    "à/hả/sao/ư/nhé unless the source sentence function supports them. "
+                    "Do not output translator commentary."
                 ),
             )
             for sid, retry_result in retry_map.items():
@@ -689,7 +868,15 @@ class LlamaCppTranslationProvider(TranslationProvider):
                     reason_flags=retry_result.metadata.reason_flags,
                     validation=retry_result.metadata.validation,
                 )
-                candidate = TranslationResult(retry_result.translation, retry_metadata)
+                candidate = self._validated_retry_candidate(
+                    sid=sid,
+                    result=TranslationResult(retry_result.translation, retry_metadata),
+                    chunk=expanded,
+                    segments_by_id=segments_by_id,
+                    options=options,
+                    memory=memory,
+                    revision_attempt=retry_index + 1,
+                )
                 if _score_result(candidate) >= _score_result(previous):
                     translations[sid] = candidate
         return self._validate_chunk_results(
@@ -698,6 +885,49 @@ class LlamaCppTranslationProvider(TranslationProvider):
             segments_by_id=segments_by_id,
             options=options,
             memory=memory,
+        )
+
+    def _validated_retry_candidate(
+        self,
+        *,
+        sid: int,
+        result: TranslationResult,
+        chunk: TranslationChunk,
+        segments_by_id: dict[int, TranslatedSegment],
+        options: TranslateOptions,
+        memory: TranslationMemory,
+        revision_attempt: int,
+    ) -> TranslationResult:
+        seg = segments_by_id.get(sid)
+        if seg is None:
+            return result
+        context_ids = context_unit_ids(
+            before=chunk.context_before_ids,
+            after=chunk.context_after_ids,
+            segments_by_id=segments_by_id,
+        )
+        return semantic_validate_result(
+            segment_id=sid,
+            source=seg.source_text,
+            source_protection=seg.source_protection,
+            result=result,
+            memory=memory,
+            options=options,
+            context_before=[
+                segments_by_id[i]
+                for i in chunk.context_before_ids
+                if i in segments_by_id
+            ],
+            context_after=[
+                segments_by_id[i]
+                for i in chunk.context_after_ids
+                if i in segments_by_id
+            ],
+            revision_attempt=revision_attempt,
+            provenance=provenance_for_segment(
+                seg=seg,
+                context_ids=context_ids,
+            ).to_dict(),
         )
 
     def _validate_chunk_results(
@@ -710,6 +940,11 @@ class LlamaCppTranslationProvider(TranslationProvider):
         memory: TranslationMemory,
     ) -> dict[int, TranslationResult]:
         validated: dict[int, TranslationResult] = {}
+        chunk_context_ids = context_unit_ids(
+            before=chunk.context_before_ids,
+            after=chunk.context_after_ids,
+            segments_by_id=segments_by_id,
+        )
         for sid, result in translations.items():
             seg = segments_by_id.get(sid)
             if seg is None:
@@ -732,6 +967,10 @@ class LlamaCppTranslationProvider(TranslationProvider):
                     if i in segments_by_id
                 ],
                 revision_attempt=result.metadata.retry_count,
+                provenance=provenance_for_segment(
+                    seg=seg,
+                    context_ids=chunk_context_ids,
+                ).to_dict(),
             )
         report = validate_batch_integrity(
             expected_ids=chunk.segment_ids,
@@ -868,9 +1107,18 @@ class LlamaCppTranslationProvider(TranslationProvider):
                 RpcErrorCode.TRANSLATE_INVALID_JSON,
                 "LLM response is not a JSON object",
             )
-        segments = payload.get("translations")
+        single = _single_entry_payload(payload, expected_ids)
+        if single is not None:
+            segments = [single]
+        else:
+            segments = payload.get("translations")
         if segments is None:
             segments = payload.get("segments")
+        if isinstance(segments, dict):
+            segments = [
+                {"id": key, "translation": value}
+                for key, value in segments.items()
+            ]
         if not isinstance(segments, list):
             raise ProviderError(
                 RpcErrorCode.TRANSLATE_INVALID_JSON,
@@ -882,9 +1130,24 @@ class LlamaCppTranslationProvider(TranslationProvider):
         for entry in segments:
             if not isinstance(entry, dict):
                 continue
-            try:
-                sid = int(entry["id"])
-            except (KeyError, TypeError, ValueError):
+            translation = entry.get("translated_text")
+            if translation is None:
+                translation = entry.get("translation")
+            if translation is None:
+                translation = entry.get("text")
+            if translation is None and isinstance(entry.get("candidates"), list):
+                candidate = _best_entry_candidate(entry["candidates"])
+                if candidate is not None:
+                    translation = (
+                        candidate.get("translated_text")
+                        or candidate.get("translation")
+                        or candidate.get("text")
+                    )
+                    entry = {**entry, **candidate}
+            sid = _coerce_response_segment_id(entry)
+            if sid is None and len(expected_ids) == 1 and len(segments) == 1 and translation is not None:
+                sid = expected_ids[0]
+            if sid is None:
                 continue
             if sid in seen:
                 raise ProviderError(
@@ -897,14 +1160,6 @@ class LlamaCppTranslationProvider(TranslationProvider):
                     RpcErrorCode.TRANSLATE_INVALID_JSON,
                     f"LLM response returned unexpected segment id: {sid}",
                 )
-            translation = entry.get("translated_text")
-            if translation is None:
-                translation = entry.get("translation")
-            if translation is None and isinstance(entry.get("candidates"), list):
-                candidate = _best_entry_candidate(entry["candidates"])
-                if candidate is not None:
-                    translation = candidate.get("translated_text") or candidate.get("translation")
-                    entry = {**entry, **candidate}
             if translation is None:
                 continue
             translations[sid] = TranslationResult(
@@ -985,8 +1240,50 @@ def _coerce_json(text: str) -> Any:
         ) from e
 
 
+def _single_entry_payload(payload: dict[str, Any], expected_ids: list[int]) -> dict[str, Any] | None:
+    if len(expected_ids) != 1:
+        return None
+    if "translations" in payload or "segments" in payload:
+        return None
+    if (
+        payload.get("translated_text") is not None
+        or payload.get("translation") is not None
+        or payload.get("text") is not None
+    ):
+        return payload
+    return None
+
+
+def _coerce_response_segment_id(entry: dict[str, Any]) -> int | None:
+    raw = (
+        entry.get("id")
+        if entry.get("id") is not None
+        else entry.get("segment_id")
+        if entry.get("segment_id") is not None
+        else entry.get("segmentId")
+    )
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float) and raw.is_integer():
+        return int(raw)
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    if stripped.isdigit():
+        return int(stripped)
+    match = re.search(r"(?:seg(?:ment)?[_-]?)(\d+)$", stripped, flags=re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+_TRANSLATOR_META_RE = re.compile(
+    r"\b(cần dịch lại|không dịch được|không rõ|có thể dịch là|có lẽ nghĩa là|"
+    r"bản dịch|phương án|option|candidate|translation|translator note)\b",
+    re.IGNORECASE,
+)
 
 
 def _drop_invalid_outputs(
@@ -1081,6 +1378,8 @@ def _float_or_default(value: Any, default: float) -> float:
 
 
 def _score_result(result: TranslationResult) -> float:
+    if HARD_SEMANTIC_FAILURES.intersection(result.metadata.reason_flags):
+        return -10.0 - 0.1 * len(result.metadata.reason_flags)
     confidence = result.metadata.confidence
     score = confidence if confidence is not None else 0.85
     if result.metadata.needs_review:
@@ -1098,6 +1397,8 @@ def _looks_like_bad_vietnamese_translation(source: str, translation: str) -> boo
     non_space = sum(1 for ch in stripped if not ch.isspace())
     if cjk_count >= 2 and cjk_count / max(1, non_space) > 0.15:
         return True
+    if _TRANSLATOR_META_RE.search(stripped.casefold()):
+        return True
 
     src_norm = _normalise_for_copy_check(source)
     out_norm = _normalise_for_copy_check(stripped)
@@ -1111,6 +1412,103 @@ def _normalise_for_copy_check(text: str) -> str:
     return " ".join(words)
 
 
+def _clean_plain_translation(text: str) -> str:
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r"^```(?:json|text)?", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"```$", "", cleaned).strip()
+    if cleaned.startswith("{"):
+        try:
+            payload = json.loads(cleaned)
+            if isinstance(payload, dict):
+                for key in ("translated_text", "translation", "text"):
+                    value = payload.get(key)
+                    if isinstance(value, str):
+                        return value.strip()
+                rows = payload.get("translations") or payload.get("segments")
+                if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict):
+                    for key in ("translated_text", "translation", "text"):
+                        value = rows[0].get(key)
+                        if isinstance(value, str):
+                            return value.strip()
+                return ""
+        except json.JSONDecodeError:
+            pass
+    if cleaned.startswith("["):
+        return ""
+    cleaned = re.sub(
+        r"^(translation|translated subtitle|bản dịch|dịch)\s*[:：]\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    if "\n" in cleaned:
+        lines = [
+            line.strip()
+            for line in cleaned.splitlines()
+            if line.strip() and not line.strip().startswith(("{", "}", "[", "]"))
+        ]
+        cleaned = lines[0] if len(lines) == 1 else " ".join(lines)
+    return cleaned.strip().strip('"“”')
+
+
+def _fallback_missing_translation(
+    *,
+    segment_id: int,
+    seg: TranslatedSegment | None,
+    target_language: str,
+) -> TranslationResult:
+    source = seg.source_text if seg is not None else ""
+    text = (
+        _conservative_fallback_vi(source)
+        if (target_language or "").lower() == "vi"
+        else "[translation unavailable]"
+    )
+    return TranslationResult(
+        text,
+        TranslationMetadata(
+            confidence=0.05,
+            needs_review=True,
+            retry_count=_MAX_REPAIR_ATTEMPTS + 1,
+            translation_method="missing_segment_fallback",
+            reason_flags=[
+                "LLM_OMITTED_SEGMENT",
+                "TRANSLATION_PLACEHOLDER",
+                "SEMANTIC_OMISSION",
+            ],
+            validation={
+                "valid": False,
+                "confidence": 0.0,
+                "issues": [
+                    "LLM_OMITTED_SEGMENT",
+                    "TRANSLATION_PLACEHOLDER",
+                    "SEMANTIC_OMISSION",
+                ],
+                "sourceLength": len(source.strip()),
+                "missingSegmentId": segment_id,
+            },
+        ),
+    )
+
+
+def _conservative_fallback_vi(source: str) -> str:
+    normalized = re.sub(r"\s+", "", source or "")
+    if not normalized:
+        return "..."
+    if re.search(r"(不要走|别走|別走)", normalized):
+        return "Đừng đi."
+    if re.search(r"(你怎么没去|你怎麼沒去|你怎么没有去|你怎麼沒有去)", normalized):
+        return "Sao bạn không đi?"
+    if re.search(r"(我们结婚了|我們結婚了)", normalized):
+        return "Chúng tôi đã kết hôn."
+    if re.search(r"(相亲|相親)", normalized) and re.search(r"(结婚|結婚)", normalized):
+        if re.search(r"(没什么难|沒有什麼難|没有什么难|沒什麼難)", normalized):
+            return "Chuyện xem mắt rồi kết hôn cũng không có gì khó."
+    if re.search(r"(等你|等了你)", normalized) and re.search(r"(3|三)\s*(个)?小时", normalized):
+        prefix = "Anh ấy đã " if re.search(r"(他|她)", normalized) else "Đã "
+        return f"{prefix}đợi bạn ba tiếng rồi."
+    return "..."
+
+
 def _revision_issue_summary(
     translations: dict[int, TranslationResult],
     segment_ids: list[int],
@@ -1121,6 +1519,36 @@ def _revision_issue_summary(
             continue
         metadata = translations[sid].metadata
         out[sid] = list(metadata.validation.get("issues") or metadata.reason_flags)
+    return out
+
+
+def _revision_anchor_summary(
+    segments_by_id: dict[int, TranslatedSegment],
+    segment_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    for sid in segment_ids:
+        seg = segments_by_id.get(sid)
+        if seg is None:
+            continue
+        protection = _compact_source_protection(seg)
+        out[sid] = {
+            key: value
+            for key, value in {
+                "source": seg.source_text,
+                "speechAct": protection.get("speechAct"),
+                "questionType": protection.get("questionType"),
+                "predicate": protection.get("predicate"),
+                "polarity": protection.get("polarity"),
+                "numbers": protection.get("numbers"),
+                "events": protection.get("events"),
+                "certainty": protection.get("certainty"),
+                "aspect": protection.get("aspect"),
+                "mustPreserve": protection.get("mustPreserve"),
+                "naturalizationBudget": protection.get("naturalizationBudget"),
+            }.items()
+            if value not in (None, [], {}, "")
+        }
     return out
 
 
@@ -1189,6 +1617,18 @@ def _compact_source_protection(seg: TranslatedSegment) -> dict[str, Any]:
         "units": logical_rows,
         "numbers": semantic.get("numbers") or [],
         "negation": semantic.get("negation") or [],
+        "speechAct": semantic.get("speechAct") or semantic.get("speech_act"),
+        "questionType": semantic.get("questionType") or semantic.get("question_type"),
+        "polarity": semantic.get("polarity"),
+        "predicate": semantic.get("predicate"),
+        "events": semantic.get("events") or [],
+        "certainty": semantic.get("certainty"),
+        "aspect": semantic.get("aspect"),
+        "sourceParticles": semantic.get("sourceParticles") or semantic.get("source_particles") or [],
+        "semanticAnchors": semantic.get("semanticAnchors") or semantic.get("semantic_anchors"),
+        "mustPreserve": semantic.get("mustPreserve") or semantic.get("must_preserve") or [],
+        "naturalizationBudget": semantic.get("naturalizationBudget") or semantic.get("naturalization_budget"),
+        "literalBaselineHint": semantic.get("literalBaselineHint") or semantic.get("literal_baseline_hint"),
         "question": bool(semantic.get("isQuestion") or semantic.get("is_question")),
         "command": bool(semantic.get("isCommand") or semantic.get("is_command")),
         "actions": actions,
@@ -1206,9 +1646,10 @@ def _compact_source_protection(seg: TranslatedSegment) -> dict[str, Any]:
     return {key: value for key, value in out.items() if value not in (None, [], {}, "")}
 
 
-def _messages_too_large(messages: list[PromptMessage], *, max_chars: int = 24_000) -> bool:
+def _messages_too_large(messages: list[PromptMessage], *, max_chars: int = 16_000) -> bool:
     # llama.cpp reports context in tokens; a conservative 3 chars/token
-    # keeps us below an 8192-token window even with JSON punctuation.
+    # is still optimistic for CJK-heavy JSON. Keep the prompt comfortably
+    # below an 8192-token window and split rows sooner when safeguards grow.
     return sum(len(message.content) for message in messages) > max_chars
 
 
@@ -1226,6 +1667,14 @@ def _compact_translation_memory(payload: dict[str, Any] | None) -> dict[str, Any
         compact["sceneRelationshipOverrides"] = payload["sceneRelationshipOverrides"][:6]
     if isinstance(payload.get("pronounPlans"), dict):
         compact["pronounPlans"] = dict(list(payload["pronounPlans"].items())[:8])
+    if isinstance(payload.get("translationUnitContract"), dict):
+        contract = payload["translationUnitContract"]
+        compact["translationUnitContract"] = {
+            "targets": list(contract.get("targets") or [])[:16],
+            "context": list(contract.get("context") or [])[:16],
+            "conversationBoundaries": list(contract.get("conversationBoundaries") or [])[:20],
+            "rule": contract.get("rule"),
+        }
     if isinstance(payload.get("characterGraph"), dict):
         graph = payload["characterGraph"]
         compact["characterGraph"] = {

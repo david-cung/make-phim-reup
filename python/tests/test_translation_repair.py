@@ -11,7 +11,6 @@ import json
 
 import pytest
 
-from movie_translator_worker.errors import RpcErrorCode
 from movie_translator_worker.translation.llama_cpp_provider import (
     LlamaCppTranslationProvider,
 )
@@ -20,7 +19,6 @@ from movie_translator_worker.translation.models import (
     TranslatedSegment,
     TranslationChunk,
 )
-from movie_translator_worker.translation.provider import ProviderError
 
 
 class _FakeCtx:
@@ -162,19 +160,20 @@ def test_unparseable_reply_does_not_abort_immediately(tmp_path):
     assert out == {7: "ok"}
 
 
-def test_gives_up_after_exhausting_retries(tmp_path):
+def test_exhausted_retries_fall_back_instead_of_aborting_chunk(tmp_path):
     ids = [3]
     # Never returns the requested id, no matter how often it is asked.
     llm = _ScriptedLlm([{}])
-    with pytest.raises(ProviderError) as excinfo:
-        _provider(tmp_path)._translate_one_chunk(
-            llm=llm,
-            chunk=_chunk(ids),
-            segments_by_id=_segments(ids),
-            options=TranslateOptions(model="m.gguf"),
-            ctx=_FakeCtx(),
-        )
-    assert excinfo.value.code == RpcErrorCode.TRANSLATE_INCOMPLETE_RESPONSE
+    out = _provider(tmp_path)._translate_one_chunk(
+        llm=llm,
+        chunk=_chunk(ids),
+        segments_by_id=_segments(ids),
+        options=TranslateOptions(model="m.gguf"),
+        ctx=_FakeCtx(),
+    )
+    assert out[3].translation
+    assert out[3].metadata.needs_review is True
+    assert "LLM_OMITTED_SEGMENT" in out[3].metadata.reason_flags
     # Original attempt plus the repair rounds, rather than a single shot.
     assert len(llm.calls) > 1
 
@@ -204,18 +203,19 @@ def test_per_segment_repair_reports_each_segment(tmp_path):
     # Never satisfies the batch, forcing the one-request-per-segment round.
     llm = _ScriptedLlm([{}])
     seen: list[str] = []
-    with pytest.raises(ProviderError):
-        _provider(tmp_path)._translate_one_chunk(
-            llm=llm,
-            chunk=_chunk(ids),
-            segments_by_id=_segments(ids),
-            options=TranslateOptions(model="m.gguf"),
-            ctx=_FakeCtx(),
-            report=lambda frac, msg: seen.append(msg),
-        )
+    out = _provider(tmp_path)._translate_one_chunk(
+        llm=llm,
+        chunk=_chunk(ids),
+        segments_by_id=_segments(ids),
+        options=TranslateOptions(model="m.gguf"),
+        ctx=_FakeCtx(),
+        report=lambda frac, msg: seen.append(msg),
+    )
     # The slowest path must narrate per segment, not go quiet.
     assert any("segment 4" in m for m in seen)
     assert any("segment 6 (3/3)" in m for m in seen)
+    assert set(out) == {4, 5, 6}
+    assert all(result.metadata.needs_review for result in out.values())
 
 
 def test_context_ids_are_not_treated_as_missing(tmp_path):
@@ -335,3 +335,67 @@ def test_final_rescue_prompt_handles_stubborn_segment(tmp_path):
         6: "Tổng giám đốc Thẩm, lần này về nước mà không về nhà cũ."
     }
     assert len(llm.calls) == 5
+
+
+def test_parser_accepts_prefixed_segment_ids() -> None:
+    payload = json.dumps(
+        {"translations": [{"id": "seg_00006", "translated_text": "Xin chào."}]}
+    )
+
+    out = LlamaCppTranslationProvider._parse_response(
+        payload,
+        expected_ids=[6],
+    )
+
+    assert out == {6: "Xin chào."}
+
+
+def test_parser_wraps_single_top_level_translation_for_one_expected_id() -> None:
+    payload = json.dumps({"translated_text": "Xin chào."})
+
+    out = LlamaCppTranslationProvider._parse_response(
+        payload,
+        expected_ids=[6],
+        strict=False,
+    )
+
+    assert out == {6: "Xin chào."}
+
+
+def test_plain_text_rescue_wraps_translation_when_json_id_is_missing(tmp_path) -> None:
+    class _PlainTextAfterJsonFailures(_ScriptedLlm):
+        def create_chat_completion(self, *, messages, temperature, **kw):
+            self.calls.append(_ids_in(next(m["content"] for m in reversed(messages) if m["role"] == "user")))
+            self.temperatures.append(temperature)
+            if "response_format" not in kw:
+                return {
+                    "choices": [
+                        {"message": {"content": "Tổng giám đốc Thẩm về nước lần này."}}
+                    ]
+                }
+            return {"choices": [{"message": {"content": json.dumps({"segments": []})}}]}
+
+    ids = [6]
+    segments = {
+        6: TranslatedSegment(
+            id=6,
+            source_text="沈 总 您 这 一 回 国",
+            translation="",
+            start=6,
+            end=7,
+        )
+    }
+    out = _provider(tmp_path)._translate_one_chunk(
+        llm=_PlainTextAfterJsonFailures([]),
+        chunk=_chunk(ids),
+        segments_by_id=segments,
+        options=TranslateOptions(
+            model="m.gguf",
+            source_language="zh",
+            target_language="vi",
+        ),
+        ctx=_FakeCtx(),
+    )
+
+    assert out[6].translation == "Tổng giám đốc Thẩm về nước lần này."
+    assert out[6].metadata.translation_method == "single_text_rescue"

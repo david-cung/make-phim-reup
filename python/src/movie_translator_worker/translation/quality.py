@@ -54,6 +54,24 @@ SERIOUS_REASON_FLAGS = {
 }.union(SEMANTIC_ERROR_CODES)
 SERIOUS_REASON_FLAGS = SERIOUS_REASON_FLAGS.union(INTEGRITY_ERROR_CODES)
 
+HARD_SEMANTIC_FAILURES = {
+    "STATEMENT_TO_QUESTION_ERROR",
+    "QUESTION_TO_STATEMENT_ERROR",
+    "QUESTION_TYPE_ERROR",
+    "NUMERIC_FIDELITY_ERROR",
+    "POLARITY_ERROR",
+    "PREDICATE_ERROR",
+    "SEMANTIC_ADDITION",
+    "SEMANTIC_OMISSION",
+    "ENTITY_ERROR",
+    "REFERENT_ERROR",
+    "RELATIONSHIP_ERROR",
+    "TRANSLATOR_COMMENTARY_LEAK",
+    "UNSUPPORTED_PARTICLE_INSERTION",
+    "UNTRANSLATED_SOURCE_FRAGMENT",
+    "CANDIDATE_LEAKAGE",
+}
+
 SEMANTIC_REVISION_FLAGS = {
     "POSSIBLE_MEANING_CHANGE",
     "POSSIBLE_MISSING_MEANING",
@@ -102,6 +120,7 @@ def semantic_validate_result(
     context_before: list[TranslatedSegment],
     context_after: list[TranslatedSegment],
     revision_attempt: int = 0,
+    provenance: dict | None = None,
 ) -> TranslationResult:
     parsed = ensure_translation_result(result)
     flags = list(dict.fromkeys(parsed.metadata.reason_flags))
@@ -182,6 +201,7 @@ def semantic_validate_result(
             "finalConfidence": final_confidence,
             "issues": list(dict.fromkeys(validation_issues)),
             "sourceLength": len(source.strip()),
+            "provenance": provenance,
             "sourceProtection": source_protection
             or source_protection_payload(segment_id=segment_id, text=source),
             "semanticRepresentation": compact_semantic_payload(representation),
@@ -195,6 +215,7 @@ def semantic_validate_result(
                     source=source,
                 ),
                 "errorTaxonomy": sorted(SEMANTIC_ERROR_CODES),
+                "hardFailures": sorted(HARD_SEMANTIC_FAILURES.intersection(flags)),
             },
             "revisionAttempt": revision_attempt,
             "checked": should_validate_semantically(
@@ -258,6 +279,8 @@ def should_validate_semantically(
     parsed = ensure_translation_result(result)
     if parsed.metadata.needs_review or parsed.metadata.retry_count > 0:
         return True
+    if _contains_cjk(source):
+        return True
     if parsed.metadata.confidence is not None and parsed.metadata.confidence < 0.86:
         return True
     if SEMANTIC_REVISION_FLAGS.intersection(parsed.metadata.reason_flags):
@@ -319,14 +342,26 @@ def semantic_issues(
     )
     phase7_map = {
         "UNTRANSLATED_CHINESE": "POSSIBLE_MISSING_MEANING",
-        "NUMBER_MISMATCH": "POSSIBLE_MEANING_CHANGE",
-        "DURATION_MISMATCH": "POSSIBLE_MEANING_CHANGE",
-        "QUANTITY_MISMATCH": "POSSIBLE_MEANING_CHANGE",
-        "MISSING_NEGATION": "POSSIBLE_MEANING_CHANGE",
-        "QUESTION_CHANGED_TO_STATEMENT": "POSSIBLE_MEANING_CHANGE",
-        "MISSING_ACTION": "POSSIBLE_MISSING_MEANING",
+        "NUMBER_MISMATCH": "NUMERIC_FIDELITY_ERROR",
+        "DURATION_MISMATCH": "NUMERIC_FIDELITY_ERROR",
+        "QUANTITY_MISMATCH": "NUMERIC_FIDELITY_ERROR",
+        "MISSING_NEGATION": "POLARITY_ERROR",
+        "QUESTION_CHANGED_TO_STATEMENT": "QUESTION_TO_STATEMENT_ERROR",
+        "MISSING_ACTION": "PREDICATE_ERROR",
     }
-    issues.extend(phase7_map.get(issue, "POSSIBLE_MEANING_CHANGE") for issue in phase7_issues)
+    for issue in phase7_issues:
+        if issue in SEMANTIC_ERROR_CODES:
+            issues.append(issue)
+            continue
+        mapped = phase7_map.get(issue, "POSSIBLE_MEANING_CHANGE")
+        issues.append(mapped)
+        if mapped in {
+            "NUMERIC_FIDELITY_ERROR",
+            "POLARITY_ERROR",
+            "QUESTION_TO_STATEMENT_ERROR",
+            "PREDICATE_ERROR",
+        }:
+            issues.append("POSSIBLE_MEANING_CHANGE")
     if _contains_cjk(translation):
         issues.append("POSSIBLE_MISSING_MEANING")
     if _missing_negation(source, translation):
@@ -357,6 +392,8 @@ def semantic_issues(
 
 def validation_confidence_for(flags: Iterable[str]) -> float:
     flags = set(flags)
+    if flags.intersection(HARD_SEMANTIC_FAILURES):
+        return 0.30
     if flags.intersection(SEMANTIC_ERROR_CODES):
         return 0.54
     if flags.intersection(
@@ -469,6 +506,9 @@ def global_consistency_issues(
 
 def _candidate_score(result: TranslationResult) -> float:
     validation = result.metadata.validation
+    hard_failures = HARD_SEMANTIC_FAILURES.intersection(result.metadata.reason_flags)
+    if hard_failures:
+        return -10.0 - 0.1 * len(hard_failures)
     final_confidence = validation.get("finalConfidence")
     try:
         score = float(final_confidence)

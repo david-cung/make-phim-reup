@@ -13,6 +13,18 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from .models import TranslatedSegment, TranslationResult, ensure_translation_result
+from .target_language import validate_target_language
+from .units import (
+    ALIGNMENT_MISMATCH,
+    CONTENT_LEAKAGE,
+    CONVERSATION_BOUNDARY_VIOLATION,
+    DUPLICATE_RESULT,
+    MISSING_RESULT,
+    SEMANTIC_OMISSION,
+    UNKNOWN_RESULT_ID,
+    TranslationContractIssue,
+    validate_translation_contract,
+)
 
 
 UNKNOWN_SPEAKER = "UNKNOWN"
@@ -20,6 +32,7 @@ UNKNOWN_SPEAKER = "UNKNOWN"
 UNTRANSLATED_SOURCE_FRAGMENT = "UNTRANSLATED_SOURCE_FRAGMENT"
 FOREIGN_LANGUAGE_CONTAMINATION = "FOREIGN_LANGUAGE_CONTAMINATION"
 CANDIDATE_LEAKAGE = "CANDIDATE_LEAKAGE"
+TRANSLATOR_COMMENTARY_LEAK = "TRANSLATOR_COMMENTARY_LEAK"
 EMPTY_TRANSLATION = "EMPTY_TRANSLATION"
 SEGMENT_MERGE_ERROR = "SEGMENT_MERGE_ERROR"
 SOURCE_ALIGNMENT_DRIFT = "SOURCE_ALIGNMENT_DRIFT"
@@ -31,26 +44,22 @@ INTEGRITY_ERROR_CODES = {
     UNTRANSLATED_SOURCE_FRAGMENT,
     FOREIGN_LANGUAGE_CONTAMINATION,
     CANDIDATE_LEAKAGE,
+    TRANSLATOR_COMMENTARY_LEAK,
     EMPTY_TRANSLATION,
     SEGMENT_MERGE_ERROR,
     SOURCE_ALIGNMENT_DRIFT,
     SUSPICIOUS_TRANSLATION_DUPLICATION,
     BATCH_CARDINALITY_ERROR,
     SPEAKER_BOUNDARY_ERROR,
+    MISSING_RESULT,
+    DUPLICATE_RESULT,
+    UNKNOWN_RESULT_ID,
+    SEMANTIC_OMISSION,
+    CONTENT_LEAKAGE,
+    ALIGNMENT_MISMATCH,
+    CONVERSATION_BOUNDARY_VIOLATION,
 }
 
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]")
-_UNEXPECTED_SCRIPT_RE = re.compile(r"[\u0400-\u04ff\u0600-\u06ff\u0590-\u05ff]")
-_JSON_OR_PROMPT_RE = re.compile(
-    r"(^\s*[\[{]|\"(?:translation|translated_text|segment_id|id)\"\s*:|"
-    r"\b(?:translator note|note:|explanation:|option\s*[abc]\s*:|candidate\s*\d*\s*:)\b)",
-    re.IGNORECASE,
-)
-_ALTERNATIVE_RE = re.compile(
-    r"(\s/\s.*\s/\s|(?:^|\b)(?:Option|Candidate)\s*[ABC123]\s*:|"
-    r"\b(?:or|hoac|hoặc)\b.{0,24}\b(?:or|hoac|hoặc)\b)",
-    re.IGNORECASE,
-)
 _VI_WORD_RE = re.compile(r"[A-Za-zÀ-ỹ]+", re.UNICODE)
 
 _SOURCE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -87,6 +96,7 @@ class BatchIntegrityReport:
     language_errors: dict[int, list[str]] = field(default_factory=dict)
     alignment_warnings: dict[int, list[str]] = field(default_factory=dict)
     speaker_boundary_errors: list[int] = field(default_factory=list)
+    contract_issues: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def valid(self) -> bool:
@@ -97,6 +107,7 @@ class BatchIntegrityReport:
             or self.language_errors
             or self.alignment_warnings
             or self.speaker_boundary_errors
+            or self.contract_issues
         )
 
     def metrics(self) -> dict[str, int]:
@@ -113,6 +124,7 @@ class BatchIntegrityReport:
             "alignment_error_count": alignment_flags.count(SOURCE_ALIGNMENT_DRIFT),
             "speaker_merge_error_count": alignment_flags.count(SEGMENT_MERGE_ERROR)
             + len(self.speaker_boundary_errors),
+            "contract_issue_count": len(self.contract_issues),
         }
 
     def to_debug_dict(self) -> dict[str, object]:
@@ -129,6 +141,7 @@ class BatchIntegrityReport:
             "alignment_warnings": dict(self.alignment_warnings),
             "language_errors": dict(self.language_errors),
             "speaker_boundary_errors": list(self.speaker_boundary_errors),
+            "contract_issues": list(self.contract_issues),
             "metrics": self.metrics(),
         }
 
@@ -151,19 +164,8 @@ def speaker_merge_allowed(left: TranslatedSegment, right: TranslatedSegment) -> 
 
 
 def validate_vietnamese_output(text: str, *, source: str = "") -> OutputValidation:
-    stripped = (text or "").strip()
-    errors: list[str] = []
-    if not stripped:
-        errors.append(EMPTY_TRANSLATION)
-    if _CJK_RE.search(stripped):
-        errors.append(UNTRANSLATED_SOURCE_FRAGMENT if _CJK_RE.search(source or "") else FOREIGN_LANGUAGE_CONTAMINATION)
-    if _UNEXPECTED_SCRIPT_RE.search(stripped):
-        errors.append(FOREIGN_LANGUAGE_CONTAMINATION)
-    if _JSON_OR_PROMPT_RE.search(stripped):
-        errors.append(CANDIDATE_LEAKAGE)
-    if _looks_like_candidate_leak(stripped):
-        errors.append(CANDIDATE_LEAKAGE)
-    return OutputValidation(valid=not errors, errors=list(dict.fromkeys(errors)))
+    validation = validate_target_language("vi", text, source=source)
+    return OutputValidation(valid=validation.valid, errors=list(validation.errors))
 
 
 def validate_batch_integrity(
@@ -179,15 +181,35 @@ def validate_batch_integrity(
     duplicates = sorted({sid for sid in actual_ids if actual_ids.count(sid) > 1})
     language_errors: dict[int, list[str]] = {}
     alignment_warnings: dict[int, list[str]] = {}
-    if (target_language or "").lower() == "vi":
-        for sid in expected.intersection(actual):
-            seg = segments_by_id.get(sid)
-            result = translations.get(sid)
-            if seg is None or result is None:
-                continue
-            validation = validate_vietnamese_output(result.translation, source=seg.source_text)
-            if validation.errors:
-                language_errors[sid] = validation.errors
+    contract_report = validate_translation_contract(
+        expected_unit_ids=expected_ids,
+        results=translations,
+    )
+    contract_issues = [issue.to_dict() for issue in contract_report.issues]
+    for issue in contract_report.issues:
+        _apply_contract_issue_to_legacy_fields(
+            issue,
+            language_errors=language_errors,
+            alignment_warnings=alignment_warnings,
+        )
+    for sid in expected.intersection(actual):
+        seg = segments_by_id.get(sid)
+        result = translations.get(sid)
+        if seg is None or result is None:
+            continue
+        validation = validate_target_language(
+            target_language,
+            result.translation,
+            source=seg.source_text,
+            metadata={
+                "sourceUnitId": stable_segment_id(seg),
+                "speakerRef": normalized_speaker_id(seg.speaker_id),
+            },
+        )
+        if validation.errors:
+            language_errors[sid] = list(
+                dict.fromkeys([*(language_errors.get(sid) or []), *validation.errors])
+            )
     ordered = _ordered_ids(segments_by_id)
     for sid in expected.intersection(actual):
         seg = segments_by_id.get(sid)
@@ -210,6 +232,7 @@ def validate_batch_integrity(
         unknown=sorted(actual - expected),
         language_errors=language_errors,
         alignment_warnings=alignment_warnings,
+        contract_issues=contract_issues,
     )
 
 
@@ -222,6 +245,31 @@ def invalid_translation_ids(report: BatchIntegrityReport) -> list[int]:
     ids.extend(report.alignment_warnings)
     ids.extend(report.speaker_boundary_errors)
     return list(dict.fromkeys(ids))
+
+
+def _apply_contract_issue_to_legacy_fields(
+    issue: TranslationContractIssue,
+    *,
+    language_errors: dict[int, list[str]],
+    alignment_warnings: dict[int, list[str]],
+) -> None:
+    try:
+        sid = int(str(issue.unit_id)) if issue.unit_id is not None else None
+    except ValueError:
+        sid = None
+    if sid is None:
+        return
+    if issue.code in {MISSING_RESULT, DUPLICATE_RESULT, UNKNOWN_RESULT_ID}:
+        return
+    if issue.code == SEMANTIC_OMISSION:
+        language_errors.setdefault(sid, []).append(EMPTY_TRANSLATION)
+        return
+    if issue.code in {
+        CONTENT_LEAKAGE,
+        ALIGNMENT_MISMATCH,
+        CONVERSATION_BOUNDARY_VIOLATION,
+    }:
+        alignment_warnings.setdefault(sid, []).append(issue.code)
 
 
 def duplicate_translation_issues(
@@ -308,15 +356,6 @@ def merge_metadata_validation(
             validation=validation,
         ),
     )
-
-
-def _looks_like_candidate_leak(text: str) -> bool:
-    if _ALTERNATIVE_RE.search(text):
-        return True
-    slash_parts = [part.strip() for part in text.split("/") if part.strip()]
-    if len(slash_parts) >= 3 and all(len(part) >= 5 for part in slash_parts):
-        return True
-    return False
 
 
 def _ordered_ids(segments_by_id: dict[int, TranslatedSegment]) -> list[int]:

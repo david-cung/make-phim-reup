@@ -904,7 +904,7 @@ pub fn build_cache_key(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let parts = [
-        "translation_v4_character_graph".to_string(),
+        "translation_v5_semantic_fidelity".to_string(),
         transcript_cache_key.to_string(),
         audio_hash.to_string(),
         options.source_language.to_ascii_lowercase(),
