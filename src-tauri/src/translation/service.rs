@@ -400,6 +400,7 @@ impl TranslationService {
             .await
             .map_err(map_project_err)?;
         let project_root = PathBuf::from(&rec.root_path);
+        let video_path = rec.source_media_path.clone();
 
         // Need a transcript to translate anything.
         let transcript = TranscriptCacheFile::load(&project_root)
@@ -681,9 +682,17 @@ impl TranslationService {
         let transcript_key_bg = transcript_key.clone();
         let audio_hash_bg = audio_hash.clone();
         tokio::spawn(async move {
+            let source_fingerprint = json!({
+                "hash": rec.source_hash,
+                "size": rec.source_size,
+                "modifiedAt": rec.source_modified_at.map(|d| d.to_rfc3339()),
+            });
             let params = json!({
                 "transcriptCacheKey": transcript_key_bg,
                 "audioHash": audio_hash_bg,
+                "videoPath": video_path,
+                "visualCacheDir": project_root_bg.join("visual").display().to_string(),
+                "sourceFingerprint": source_fingerprint,
                 "segments": segments_wire,
                 "existingTranslations": existing_wire,
                 "options": options_to_wire(&options_bg),

@@ -24,6 +24,7 @@ from .. import logging as log
 from ..errors import RpcError, RpcErrorCode
 from ..rpc import HandlerContext
 from ..source_protection import source_protection_payload
+from ..visual.analyzer import VideoVisualAnalyzer, apply_visual_result_to_segments
 from . import prompts, registry
 from .llama_cpp_provider import LlamaCppTranslationProvider
 from .models import (
@@ -241,6 +242,7 @@ def translate_translate(params: dict[str, Any], ctx: HandlerContext) -> dict[str
     if not isinstance(raw_segments, list) or not raw_segments:
         raise RpcError(RpcErrorCode.INVALID_PARAMS, "segments must be a non-empty list")
     segments_by_id, ordered_ids = _load_segments(raw_segments)
+    visual_status = _apply_visual_identity(params, segments_by_id)
 
     existing_map = _existing_translations(params.get("existingTranslations"))
     # Seed the base list with any existing translations so we can compute
@@ -285,6 +287,7 @@ def translate_translate(params: dict[str, Any], ctx: HandlerContext) -> dict[str
             "sourceLanguage": options.source_language,
             "targetLanguage": options.target_language,
             "promptVersion": options.prompt_version,
+            "visualIdentityStatus": visual_status,
         }
 
     # Chunk *only* the ids that still need work — completed segments
@@ -365,6 +368,7 @@ def translate_translate(params: dict[str, Any], ctx: HandlerContext) -> dict[str
         "sourceLanguage": options.source_language,
         "targetLanguage": options.target_language,
         "promptVersion": options.prompt_version,
+        "visualIdentityStatus": visual_status,
     }
 
 
@@ -504,6 +508,44 @@ def _load_segments(
         )
         order.append(sid)
     return by_id, order
+
+
+def _apply_visual_identity(
+    params: dict[str, Any],
+    segments_by_id: dict[int, TranslatedSegment],
+) -> dict[str, Any]:
+    video_path = params.get("videoPath")
+    if not isinstance(video_path, str) or not video_path:
+        return {"status": "unavailable", "reason": "videoPath not provided"}
+    cache_dir = params.get("visualCacheDir")
+    source_fp = params.get("sourceFingerprint")
+    try:
+        analyzer = VideoVisualAnalyzer(models_root=_models_root())
+        ordered = [segments_by_id[sid] for sid in sorted(segments_by_id)]
+        result = analyzer.analyze(
+            video_path=video_path,
+            segments=ordered,
+            cache_dir=cache_dir if isinstance(cache_dir, str) and cache_dir else None,
+            source_fingerprint=source_fp if isinstance(source_fp, dict) else None,
+        )
+        apply_visual_result_to_segments(ordered, result)
+        status = {
+            "status": result.status,
+            "cacheHit": result.cache_hit,
+            "metrics": dict(result.metrics),
+            "modelInfo": result.model_info.to_dict() if result.model_info else None,
+            "error": result.error,
+        }
+        if result.status in ("failed", "unavailable"):
+            log.warn(
+                "visual identity unavailable; using audio-only translation context",
+                status=result.status,
+                error=result.error,
+            )
+        return status
+    except Exception as e:
+        log.warn("visual identity failed; using audio-only translation context", error=str(e))
+        return {"status": "failed", "error": str(e), "cacheHit": False}
 
 
 def _existing_translations(payload: Any) -> dict[int, tuple[str, bool]]:

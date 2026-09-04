@@ -237,6 +237,8 @@ class BasicFaceIdentityMatcher:
     def same_identity_confidence(self, left: FaceTrack, right: FaceTrack) -> float:
         if left.face_track_id == right.face_track_id:
             return 1.0
+        if _range_overlap(left.start_ms, left.end_ms, right.start_ms, right.end_ms) > 0:
+            return 0.0
         if left.cluster_id and left.cluster_id == right.cluster_id:
             return min(left.confidence, right.confidence, 0.94)
         if left.embedding is not None and right.embedding is not None:

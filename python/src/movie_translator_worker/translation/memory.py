@@ -1162,6 +1162,8 @@ def build_character_context_store(
             },
         )
 
+    _apply_visual_identity_contexts(segments, movie_memory, store)
+
     relationships: list[RelationshipMemory] = []
     relationships.extend(movie_memory.relationships)
     for rows in movie_memory.scene_relationship_overrides.values():
@@ -1218,6 +1220,64 @@ def build_character_context_store(
             confidence=character.confidence,
         )
     return store
+
+
+def _apply_visual_identity_contexts(
+    segments: list[TranslatedSegment],
+    movie_memory: MovieMemory,
+    store: CharacterContextStore,
+) -> None:
+    seen_status = None
+    for seg in segments:
+        visual = (seg.pronoun_context or {}).get("visualIdentity")
+        status = (seg.pronoun_context or {}).get("visualIdentityStatus")
+        if isinstance(status, dict):
+            seen_status = status
+        if not isinstance(visual, dict):
+            continue
+        speaker_id = _stable_speaker(visual.get("speaker_id") or seg.speaker_id)
+        character_id = visual.get("character_id")
+        confidence = _safe_float(visual.get("identity_confidence"), 0.0)
+        if speaker_id and isinstance(character_id, str) and character_id:
+            movie_memory.speaker_character_mapping[speaker_id] = character_id
+            profile = store.speaker_profiles.get(speaker_id)
+            if profile is None:
+                store.speaker_profiles[speaker_id] = SpeakerProfile(
+                    speaker_id=speaker_id,
+                    character_id=character_id,
+                    gender_hint="unknown",
+                    gender_confidence=0.0,
+                    dialogue_segment_ids=[seg.id],
+                    voice_evidence={
+                        "source": "visual_identity",
+                        "identity_confidence": confidence,
+                    },
+                )
+            else:
+                profile.character_id = character_id
+                if seg.id not in profile.dialogue_segment_ids:
+                    profile.dialogue_segment_ids.append(seg.id)
+                profile.voice_evidence["visual_identity"] = {
+                    "character_id": character_id,
+                    "identity_confidence": confidence,
+                }
+            context = store.character_contexts.setdefault(
+                character_id,
+                CharacterContext(character_id=character_id),
+            )
+            if speaker_id not in context.associated_speaker_ids:
+                context.associated_speaker_ids.append(speaker_id)
+            if seg.id not in context.dialogue_segment_ids:
+                context.dialogue_segment_ids.append(seg.id)
+            context.confidence = max(context.confidence, confidence)
+        for visible_id in visual.get("visible_character_ids") or []:
+            if isinstance(visible_id, str) and visible_id:
+                store.character_contexts.setdefault(
+                    visible_id,
+                    CharacterContext(character_id=visible_id),
+                )
+    if seen_status is not None:
+        store.multimodal_extension_points["visual_identity"] = seen_status
 
 
 def build_scene_memory(
@@ -2102,9 +2162,18 @@ def _stable_speaker(speaker_id: str | None) -> str | None:
     return speaker
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _has_movie_memory_signal(segments: list[TranslatedSegment]) -> bool:
     for seg in segments:
         if _stable_speaker(seg.speaker_id) is not None:
+            return True
+        if isinstance(seg.pronoun_context, dict) and seg.pronoun_context.get("visualIdentity"):
             return True
         if extract_name_mentions(seg.source_text):
             return True
