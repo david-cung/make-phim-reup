@@ -42,6 +42,9 @@ class VisualAnalysisConfig:
     embedding_interval_frames: int = 5
     assignment_threshold: float = 0.35
     reid_threshold: float = 0.82
+    identity_merge_threshold: float = 0.90
+    debug_overlay_dir: str | None = None
+    debug_overlay_max_frames: int = 24
     visual_cache_version: str = VISUAL_ANALYSIS_VERSION
 
     def signature(self) -> dict[str, Any]:
@@ -58,6 +61,7 @@ class VisualAnalysisConfig:
                 "embedding_interval_frames",
                 "assignment_threshold",
                 "reid_threshold",
+                "identity_merge_threshold",
                 "visual_cache_version",
             )
         }
@@ -187,7 +191,10 @@ class VideoVisualAnalyzer:
 
         try:
             decoded = self._decode_and_track(path, segment_list, detector, embedder)
-            resolver = CharacterIdentityResolver(video_scope_id=str(cache_key))
+            resolver = CharacterIdentityResolver(
+                video_scope_id=str(cache_key),
+                face_merge_threshold=self.config.identity_merge_threshold,
+            )
             speakers = speaker_identities_from_segments(segment_list)
             active = _active_evidence_for_segments(
                 segments=segment_list,
@@ -213,9 +220,24 @@ class VideoVisualAnalyzer:
                 active_candidates=candidates,
             )
             metrics = dict(decoded.metrics)
+            visual_characters = [
+                character for character in graph.characters.values() if character.face_track_ids
+            ]
             metrics.update(
                 {
-                    "characters_resolved": len(graph.characters),
+                    "characters_resolved": len(visual_characters),
+                    "identity_graph_characters": len(graph.characters),
+                    "track_embedding_quality": _track_embedding_quality(decoded.face_tracks),
+                    "identity_merge_decisions": list(graph.merge_decisions[-48:]),
+                    "character_clusters": [
+                        {
+                            "character_id": character.character_id,
+                            "face_tracks": sorted(character.face_track_ids),
+                            "speaker_ids": sorted(character.speaker_ids),
+                            "identity_confidence": round(float(character.identity_confidence), 3),
+                        }
+                        for character in visual_characters
+                    ],
                     "active_speaker_candidates": sum(len(v) for v in candidates.values()),
                     "dialogue_segments_with_visual_evidence": sum(
                         1 for r in resolutions.values() if r.visible_character_ids
@@ -225,6 +247,15 @@ class VideoVisualAnalyzer:
                     "cache_hit": False,
                 }
             )
+            overlay_dir = self.config.debug_overlay_dir
+            if overlay_dir:
+                metrics["debug_overlay_frames"] = _write_debug_overlays(
+                    path,
+                    decoded.face_tracks,
+                    graph.face_links,
+                    Path(overlay_dir),
+                    max_frames=self.config.debug_overlay_max_frames,
+                )
             result = VisualAnalysisResult(
                 "available",
                 face_tracks=decoded.face_tracks,
@@ -769,6 +800,102 @@ def _track_quality(observations: list[FaceObservation], embedding: list[float] |
     length = min(1.0, len(observations) / 8.0)
     emb = 0.15 if embedding is not None else 0.0
     return max(0.0, min(0.98, 0.42 * det + 0.28 * vis + 0.15 * length + emb))
+
+
+def _track_embedding_quality(tracks: list[FaceTrack]) -> dict[str, dict[str, Any]]:
+    return {
+        track.face_track_id: {
+            "embedding_present": track.embedding is not None,
+            "track_quality": round(float(track.confidence), 3),
+            "observations": len(track.observations),
+            "mean_detection_confidence": round(
+                sum(obs.detection_confidence for obs in track.observations)
+                / max(1, len(track.observations)),
+                3,
+            ),
+            "mean_visibility": round(
+                sum(obs.visibility_score for obs in track.observations)
+                / max(1, len(track.observations)),
+                3,
+            ),
+        }
+        for track in tracks
+    }
+
+
+def _write_debug_overlays(
+    video_path: Path,
+    tracks: list[FaceTrack],
+    face_links: dict[str, tuple[str, float]],
+    output_dir: Path,
+    *,
+    max_frames: int,
+) -> int:
+    if max_frames <= 0:
+        return 0
+    observations_by_ts: dict[int, list[tuple[FaceTrack, FaceObservation]]] = {}
+    for track in tracks:
+        for observation in track.observations:
+            observations_by_ts.setdefault(observation.timestamp_ms, []).append((track, observation))
+    if not observations_by_ts:
+        return 0
+
+    cv2 = _cv2()
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return 0
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 25.0
+    target_ts = set(sorted(observations_by_ts)[:max_frames])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written = 0
+    idx = 0
+    try:
+        while written < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            timestamp_ms = int(round(idx * 1000.0 / fps))
+            idx += 1
+            if timestamp_ms not in target_ts:
+                continue
+            for track, observation in observations_by_ts[timestamp_ms]:
+                _draw_debug_observation(frame, track, observation, face_links)
+            out = output_dir / f"visual_identity_{timestamp_ms:08d}ms.png"
+            cv2.imwrite(str(out), frame)
+            written += 1
+    finally:
+        cap.release()
+    return written
+
+
+def _draw_debug_observation(
+    frame: Any,
+    track: FaceTrack,
+    observation: FaceObservation,
+    face_links: dict[str, tuple[str, float]],
+) -> None:
+    cv2 = _cv2()
+    bbox = observation.bbox
+    x1, y1 = int(round(bbox.x)), int(round(bbox.y))
+    x2, y2 = int(round(bbox.x + bbox.width)), int(round(bbox.y + bbox.height))
+    character_id = face_links.get(track.face_track_id, ("UNRESOLVED", 0.0))[0]
+    mouth = (
+        f"{observation.mouth_activity_score:.2f}"
+        if observation.mouth_activity_score is not None
+        else "NA"
+    )
+    label = f"{track.face_track_id} {character_id} mouth={mouth}"
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (64, 220, 255), 2)
+    cv2.putText(
+        frame,
+        label,
+        (x1, max(12, y1 - 6)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        (64, 220, 255),
+        1,
+        cv2.LINE_AA,
+    )
 
 
 def _overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> int:

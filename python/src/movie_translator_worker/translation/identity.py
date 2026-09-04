@@ -237,7 +237,7 @@ class BasicFaceIdentityMatcher:
     def same_identity_confidence(self, left: FaceTrack, right: FaceTrack) -> float:
         if left.face_track_id == right.face_track_id:
             return 1.0
-        if _range_overlap(left.start_ms, left.end_ms, right.start_ms, right.end_ms) > 0:
+        if not tracks_can_share_identity(left, right):
             return 0.0
         if left.cluster_id and left.cluster_id == right.cluster_id:
             return min(left.confidence, right.confidence, 0.94)
@@ -406,6 +406,9 @@ class MultimodalIdentityGraph:
         self.face_links: dict[str, tuple[str, float]] = {}
         self.segment_resolutions: dict[str, SegmentIdentityResolution] = {}
         self.conflicts: list[IdentityEvidence] = []
+        self.same_identity_evidence: dict[tuple[str, str], list[IdentityEvidence]] = {}
+        self.different_identity_evidence: dict[tuple[str, str], list[IdentityEvidence]] = {}
+        self.merge_decisions: list[dict[str, Any]] = []
         self._next_character = 1
 
     def new_character(self) -> CharacterIdentity:
@@ -470,6 +473,12 @@ class MultimodalIdentityGraph:
         confidence: float,
         evidence: IdentityEvidence,
     ) -> None:
+        for existing_face in list(character.face_track_ids):
+            if self.different_identity_confidence(existing_face, face_track_id) >= 0.95:
+                split = self.new_character()
+                split.metadata["split_from_character"] = character.character_id
+                character = split
+                break
         existing = self.face_links.get(face_track_id)
         if existing and existing[0] != character.character_id:
             self._handle_conflict(
@@ -498,6 +507,16 @@ class MultimodalIdentityGraph:
             self.face_links[face_track_id][1],
             confidence,
         )
+
+    def record_same_identity(self, left: str, right: str, evidence: IdentityEvidence) -> None:
+        self.same_identity_evidence.setdefault(_pair_key(left, right), []).append(evidence)
+
+    def record_different_identity(self, left: str, right: str, evidence: IdentityEvidence) -> None:
+        self.different_identity_evidence.setdefault(_pair_key(left, right), []).append(evidence)
+
+    def different_identity_confidence(self, left: str, right: str) -> float:
+        items = self.different_identity_evidence.get(_pair_key(left, right), [])
+        return max((item.confidence for item in items), default=0.0)
 
     def _handle_conflict(
         self,
@@ -563,6 +582,15 @@ class MultimodalIdentityGraph:
                 for sid, resolution in sorted(self.segment_resolutions.items())
             },
             "conflicts": [item.to_dict() for item in self.conflicts[-24:]],
+            "same_identity_evidence": {
+                f"{left}<->{right}": [item.to_dict() for item in rows[-8:]]
+                for (left, right), rows in sorted(self.same_identity_evidence.items())
+            },
+            "different_identity_evidence": {
+                f"{left}<->{right}": [item.to_dict() for item in rows[-8:]]
+                for (left, right), rows in sorted(self.different_identity_evidence.items())
+            },
+            "merge_decisions": list(self.merge_decisions[-48:]),
         }
 
 
@@ -573,10 +601,12 @@ class CharacterIdentityResolver:
         face_matcher: FaceIdentityMatcher | None = None,
         voice_matcher: VoiceIdentityMatcher | None = None,
         video_scope_id: str = "current_video",
+        face_merge_threshold: float = 0.90,
     ) -> None:
         self.face_matcher = face_matcher or BasicFaceIdentityMatcher()
         self.voice_matcher = voice_matcher or BasicVoiceIdentityMatcher()
         self.graph = MultimodalIdentityGraph(video_scope_id=video_scope_id)
+        self.face_merge_threshold = face_merge_threshold
 
     def resolve(
         self,
@@ -587,6 +617,7 @@ class CharacterIdentityResolver:
     ) -> MultimodalIdentityGraph:
         speakers_by_id = {speaker.speaker_id: speaker for speaker in speakers}
         faces_by_id = {face.face_track_id: face for face in face_tracks}
+        self._record_face_negative_evidence(list(faces_by_id.values()))
         self._resolve_voice_reidentification(list(speakers_by_id.values()))
         self._resolve_face_reidentification(list(faces_by_id.values()))
         for speaker in speakers_by_id.values():
@@ -608,6 +639,7 @@ class CharacterIdentityResolver:
 
         for evidence in active_speaker_evidence:
             self._apply_active_speaker_evidence(evidence, faces_by_id)
+        self._ensure_face_characters(list(faces_by_id.values()))
         return self.graph
 
     def _resolve_voice_reidentification(self, speakers: list[SpeakerIdentity]) -> None:
@@ -637,9 +669,47 @@ class CharacterIdentityResolver:
     def _resolve_face_reidentification(self, faces: list[FaceTrack]) -> None:
         for left_index, left in enumerate(faces):
             for right in faces[left_index + 1 :]:
+                negative = self.graph.different_identity_confidence(
+                    left.face_track_id,
+                    right.face_track_id,
+                )
                 confidence = self.face_matcher.same_identity_confidence(left, right)
-                if confidence < 0.88:
+                quality = min(left.confidence, right.confidence)
+                threshold = self.face_merge_threshold
+                decision = "reject_merge"
+                reason = "below_threshold"
+                if negative >= 0.95:
+                    reason = "co_occurrence_conflict"
+                elif quality < 0.55:
+                    reason = "low_track_quality"
+                elif confidence >= threshold and quality >= 0.55:
+                    decision = "merge"
+                    reason = "strong_embedding_no_negative_evidence"
+                self.graph.merge_decisions.append(
+                    {
+                        "track_a": left.face_track_id,
+                        "track_b": right.face_track_id,
+                        "embedding_similarity": round(float(confidence), 3),
+                        "track_quality": round(float(quality), 3),
+                        "negative_identity_confidence": round(float(negative), 3),
+                        "threshold": threshold,
+                        "decision": decision,
+                        "reason": reason,
+                    }
+                )
+                if decision != "merge":
                     continue
+                self.graph.record_same_identity(
+                    left.face_track_id,
+                    right.face_track_id,
+                    IdentityEvidence(
+                        "face_embedding_similarity",
+                        confidence,
+                        source_id=left.face_track_id,
+                        target_id=right.face_track_id,
+                        details={"track_quality": round(float(quality), 3)},
+                    ),
+                )
                 character = (
                     self.graph.character_for_face(left.face_track_id)
                     or self.graph.character_for_face(right.face_track_id)
@@ -658,6 +728,56 @@ class CharacterIdentityResolver:
                         ),
                     )
                     _touch_character(character, face.start_ms, face.end_ms)
+
+    def _record_face_negative_evidence(self, faces: list[FaceTrack]) -> None:
+        for left_index, left in enumerate(faces):
+            for right in faces[left_index + 1 :]:
+                if tracks_can_share_identity(left, right):
+                    continue
+                self.graph.record_different_identity(
+                    left.face_track_id,
+                    right.face_track_id,
+                    IdentityEvidence(
+                        "cannot_be_same_character",
+                        1.0,
+                        source_id=left.face_track_id,
+                        target_id=right.face_track_id,
+                        details={
+                            "reason": "simultaneous_independent_visibility",
+                            "temporal_overlap_ms": _range_overlap(
+                                left.start_ms,
+                                left.end_ms,
+                                right.start_ms,
+                                right.end_ms,
+                            ),
+                            "max_observation_iou": round(
+                                _max_simultaneous_iou(left, right),
+                                3,
+                            ),
+                        },
+                    ),
+                )
+
+    def _ensure_face_characters(self, faces: list[FaceTrack]) -> None:
+        for face in faces:
+            if face.confidence < 0.45:
+                continue
+            if self.graph.character_for_face(face.face_track_id) is not None:
+                continue
+            character = self.graph.new_character()
+            self.graph.link_face(
+                face.face_track_id,
+                character,
+                max(0.45, face.confidence * 0.75),
+                IdentityEvidence(
+                    "visible_face_identity",
+                    max(0.45, face.confidence * 0.75),
+                    source_id=face.face_track_id,
+                    target_id=character.character_id,
+                    details={"reason": "visible_non_speaking_character"},
+                ),
+            )
+            _touch_character(character, face.start_ms, face.end_ms)
 
     def _apply_active_speaker_evidence(
         self,
@@ -912,6 +1032,44 @@ def _touch_character(character: CharacterIdentity, start_ms: int, end_ms: int) -
 
 def _range_overlap(left_start: int, left_end: int, right_start: int, right_end: int) -> int:
     return max(0, min(left_end, right_end) - max(left_start, right_start))
+
+
+def tracks_can_share_identity(left: FaceTrack, right: FaceTrack) -> bool:
+    """Return False for simultaneous independent faces.
+
+    The only co-occurrence exception is a likely duplicate detection of
+    the same physical face: same/similar timestamp and very high bbox
+    overlap. Embedding similarity alone is deliberately ignored here.
+    """
+    if _range_overlap(left.start_ms, left.end_ms, right.start_ms, right.end_ms) <= 0:
+        return True
+    return _max_simultaneous_iou(left, right) >= 0.88
+
+
+def _max_simultaneous_iou(left: FaceTrack, right: FaceTrack, *, tolerance_ms: int = 80) -> float:
+    best = 0.0
+    for a in left.observations:
+        for b in right.observations:
+            if abs(a.timestamp_ms - b.timestamp_ms) <= tolerance_ms:
+                best = max(best, _bbox_iou(a.bbox, b.bbox))
+    return best
+
+
+def _bbox_iou(left: BoundingBox, right: BoundingBox) -> float:
+    lx2 = left.x + left.width
+    ly2 = left.y + left.height
+    rx2 = right.x + right.width
+    ry2 = right.y + right.height
+    iw = max(0.0, min(lx2, rx2) - max(left.x, right.x))
+    ih = max(0.0, min(ly2, ry2) - max(left.y, right.y))
+    inter = iw * ih
+    union = left.width * left.height + right.width * right.height - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _pair_key(left: str, right: str) -> tuple[str, str]:
+    ordered = sorted((str(left), str(right)))
+    return (ordered[0], ordered[1])
 
 
 def _mean(values: Iterable[float | None]) -> float:

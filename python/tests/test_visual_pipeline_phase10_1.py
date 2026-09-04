@@ -9,8 +9,12 @@ import pytest
 from movie_translator_worker.translation.handlers import configure, translate_translate
 from movie_translator_worker.translation.identity import (
     ActiveSpeakerResolver,
+    ActiveSpeakerEvidence,
     BasicFaceIdentityMatcher,
+    CharacterIdentityResolver,
     FaceTrack,
+    FaceObservation,
+    SpeakerIdentity,
 )
 from movie_translator_worker.translation.memory import TranslationMemory
 from movie_translator_worker.translation.models import TranslatedSegment
@@ -18,6 +22,7 @@ from movie_translator_worker.visual.analyzer import (
     VideoVisualAnalyzer,
     VisualAnalysisConfig,
     _Detection,
+    _suppress_duplicates,
 )
 from movie_translator_worker.translation.identity import BoundingBox
 
@@ -118,7 +123,11 @@ def test_b_two_people_create_independent_tracks(tmp_path: Path) -> None:
     ).analyze(video_path=_video(tmp_path / "two.avi"), segments=[_segment()], cache_dir=tmp_path / "cache")
 
     assert result.metrics["face_tracks_created"] == 2
+    assert result.metrics["characters_resolved"] == 2
     assert len({track.face_track_id for track in result.face_tracks}) == 2
+    decisions = result.metrics["identity_merge_decisions"]
+    assert decisions[0]["decision"] == "reject_merge"
+    assert decisions[0]["reason"] == "co_occurrence_conflict"
 
 
 def test_c_track_reentry_creates_new_track_but_reidentifies(tmp_path: Path) -> None:
@@ -188,8 +197,26 @@ def test_f_offscreen_speech_remains_possible_with_inactive_face() -> None:
 
 
 def test_g_cooccurring_faces_do_not_merge_despite_similar_embeddings() -> None:
-    left = FaceTrack("FACE_TRACK_0001", 0, 1000, embedding=[1.0, 0.0], confidence=0.95)
-    right = FaceTrack("FACE_TRACK_0002", 500, 1300, embedding=[0.99, 0.01], confidence=0.95)
+    left = FaceTrack(
+        "FACE_TRACK_0001",
+        0,
+        1000,
+        observations=[
+            FaceObservation(500, BoundingBox(10, 10, 40, 40), 0.9, 0.9)
+        ],
+        embedding=[1.0, 0.0],
+        confidence=0.95,
+    )
+    right = FaceTrack(
+        "FACE_TRACK_0002",
+        500,
+        1300,
+        observations=[
+            FaceObservation(500, BoundingBox(80, 10, 40, 40), 0.9, 0.9)
+        ],
+        embedding=[0.99, 0.01],
+        confidence=0.95,
+    )
     assert BasicFaceIdentityMatcher().same_identity_confidence(left, right) == 0.0
 
 
@@ -302,3 +329,137 @@ def test_k_production_handler_executes_visual_analyzer(monkeypatch: pytest.Monke
     )
 
     assert result["visualIdentityStatus"]["status"] == "available"
+
+
+def test_l_same_person_across_cuts_can_reidentify_without_cooccurrence(tmp_path: Path) -> None:
+    result = VideoVisualAnalyzer(
+        models_root=tmp_path,
+        detector=_FakeDetector(gap=(650, 1450)),
+        embedder=_FakeEmbedder(),
+        config=VisualAnalysisConfig(scan_fps=4.0, min_face_size_px=10, track_max_gap_ms=250),
+    ).analyze(video_path=_video(tmp_path / "same_cut.avi"), segments=[_segment()], cache_dir=tmp_path / "cache")
+
+    assert result.metrics["face_tracks_created"] >= 2
+    assert result.metrics["characters_resolved"] == 1
+    assert any(d["decision"] == "merge" for d in result.metrics["identity_merge_decisions"])
+
+
+def test_m_similar_coexisting_faces_remain_separate_characters() -> None:
+    left = FaceTrack(
+        "FACE_TRACK_0001",
+        0,
+        1000,
+        observations=[
+            FaceObservation(500, BoundingBox(10, 10, 40, 40), 0.9, 0.9)
+        ],
+        embedding=[1.0, 0.0],
+        confidence=0.95,
+    )
+    right = FaceTrack(
+        "FACE_TRACK_0002",
+        0,
+        1000,
+        observations=[
+            FaceObservation(500, BoundingBox(80, 10, 40, 40), 0.9, 0.9)
+        ],
+        embedding=[0.96, 0.04],
+        confidence=0.95,
+    )
+    graph = CharacterIdentityResolver().resolve(
+        speakers=[],
+        face_tracks=[left, right],
+        active_speaker_evidence=[],
+    )
+
+    assert len(graph.characters) == 2
+    assert graph.different_identity_confidence("FACE_TRACK_0001", "FACE_TRACK_0002") == 1.0
+    assert graph.merge_decisions[0]["decision"] == "reject_merge"
+
+
+def test_n_duplicate_detections_are_suppressed_before_tracking() -> None:
+    detections = [
+        _Detection(BoundingBox(10, 10, 40, 40), 0.9),
+        _Detection(BoundingBox(11, 10, 40, 40), 0.88),
+        _Detection(BoundingBox(90, 10, 40, 40), 0.9),
+    ]
+    kept = _suppress_duplicates(detections)
+
+    assert len(kept) == 2
+
+
+def test_o_two_speaker_face_pairs_stay_separate() -> None:
+    face1 = FaceTrack(
+        "FACE_TRACK_0001",
+        0,
+        1000,
+        observations=[
+            FaceObservation(500, BoundingBox(10, 10, 40, 40), 0.9, 0.9)
+        ],
+        embedding=[1.0, 0.0],
+        confidence=0.95,
+    )
+    face2 = FaceTrack(
+        "FACE_TRACK_0002",
+        0,
+        1000,
+        observations=[
+            FaceObservation(500, BoundingBox(80, 10, 40, 40), 0.9, 0.9)
+        ],
+        embedding=[0.98, 0.02],
+        confidence=0.95,
+    )
+    graph = CharacterIdentityResolver().resolve(
+        speakers=[
+            SpeakerIdentity("SPEAKER_01", confidence=0.95),
+            SpeakerIdentity("SPEAKER_02", confidence=0.95),
+        ],
+        face_tracks=[face1, face2],
+        active_speaker_evidence=[
+            ActiveSpeakerEvidence(
+                "segment_1",
+                "SPEAKER_01",
+                "FACE_TRACK_0001",
+                1.0,
+                0.9,
+                0.9,
+                0.95,
+                0.9,
+                0.92,
+                "direct_active_speaker",
+            ),
+            ActiveSpeakerEvidence(
+                "segment_2",
+                "SPEAKER_02",
+                "FACE_TRACK_0002",
+                1.0,
+                0.9,
+                0.9,
+                0.95,
+                0.9,
+                0.92,
+                "direct_active_speaker",
+            ),
+        ],
+    )
+
+    linked = {item[0] for item in graph.face_links.values()}
+    assert len(linked) == 2
+    assert graph.character_for_speaker("SPEAKER_01") != graph.character_for_speaker("SPEAKER_02")
+
+
+def test_p_optional_debug_overlay_writes_inspection_frames(tmp_path: Path) -> None:
+    overlay_dir = tmp_path / "overlays"
+    result = VideoVisualAnalyzer(
+        models_root=tmp_path,
+        detector=_FakeDetector(two_faces=True),
+        embedder=_FakeEmbedder(),
+        config=VisualAnalysisConfig(
+            scan_fps=4.0,
+            min_face_size_px=10,
+            debug_overlay_dir=str(overlay_dir),
+            debug_overlay_max_frames=3,
+        ),
+    ).analyze(video_path=_video(tmp_path / "overlay.avi"), segments=[_segment()], cache_dir=tmp_path / "cache")
+
+    assert result.metrics["debug_overlay_frames"] == 3
+    assert len(list(overlay_dir.glob("visual_identity_*ms.png"))) == 3
