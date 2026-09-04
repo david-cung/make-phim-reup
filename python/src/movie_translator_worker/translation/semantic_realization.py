@@ -60,6 +60,7 @@ SEMANTIC_ERROR_CODES = {
 }
 
 AMBIGUITY_DEEP_REASONING_THRESHOLD = 0.70
+MAX_CONTEXTUAL_REPAIR_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,278 @@ class SourceSemanticRepresentation:
             "ambiguityScore": round(float(self.ambiguity_score), 3),
             "realizationGuidance": dict(self.realization_guidance),
         }
+
+
+@dataclass(frozen=True)
+class ContextualRealizationResult:
+    translation: str
+    realization_notes: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "translation": self.translation,
+            "realization_notes": list(self.realization_notes),
+            "confidence": round(float(self.confidence), 3),
+        }
+
+
+@dataclass(frozen=True)
+class _RealizationCandidate:
+    translation: str
+    notes: list[str] = field(default_factory=list)
+
+
+class ContextualVietnameseRealizer:
+    """Choose Vietnamese surface wording from semantic facts.
+
+    This is intentionally a small deterministic safety layer. The LLM still
+    does the broad translation work, but relationship/address terms can be
+    realized and repaired here without storing Chinese terms as fixed
+    Vietnamese pronoun mappings.
+    """
+
+    def realize(
+        self,
+        *,
+        representation: SourceSemanticRepresentation,
+        speaker: str | None = None,
+        listener: str | None = None,
+        character_memory: dict[str, Any] | None = None,
+        relationship_memory: list[dict[str, Any]] | None = None,
+        scene_context: dict[str, Any] | None = None,
+        previous_translations: list[str] | None = None,
+        pronoun_plan: PronounPlan | None = None,
+        seed_translation: str | None = None,
+    ) -> ContextualRealizationResult:
+        _ = (speaker, listener, character_memory, relationship_memory, scene_context, previous_translations)
+        all_candidates = self._candidate_translations(
+            representation=representation,
+            pronoun_plan=pronoun_plan,
+            seed_translation=seed_translation,
+        )
+        candidates = all_candidates
+        if seed_translation and seed_translation.strip():
+            seed = seed_translation.strip()
+            candidates = [
+                candidate
+                for candidate in all_candidates
+                if candidate.translation == seed and "seed_translation" in candidate.notes
+            ] or [_RealizationCandidate(seed, ["seed_translation"])]
+        if not candidates:
+            return ContextualRealizationResult(
+                translation=(seed_translation or "").strip(),
+                realization_notes=["no_contextual_candidate"],
+                confidence=0.0,
+            )
+
+        best, issues = self._best_candidate(candidates, representation, pronoun_plan)
+        attempts = 0
+        while self._serious_issues(issues) and attempts < MAX_CONTEXTUAL_REPAIR_ATTEMPTS:
+            attempts += 1
+            repair_candidates = self._repair_candidates(
+                representation=representation,
+                failed=best,
+                issues=issues,
+                pronoun_plan=pronoun_plan,
+            )
+            if not repair_candidates:
+                break
+            best, issues = self._best_candidate(repair_candidates, representation, pronoun_plan)
+
+        notes = list(best.notes)
+        if attempts:
+            notes.append(f"self_repair_attempts:{attempts}")
+        if issues:
+            notes.extend(f"critic:{issue}" for issue in issues)
+        return ContextualRealizationResult(
+            translation=best.translation,
+            realization_notes=list(dict.fromkeys(notes)),
+            confidence=self._confidence_for_issues(issues),
+        )
+
+    def _candidate_translations(
+        self,
+        *,
+        representation: SourceSemanticRepresentation,
+        pronoun_plan: PronounPlan | None,
+        seed_translation: str | None,
+    ) -> list[_RealizationCandidate]:
+        candidates: list[_RealizationCandidate] = []
+        if seed_translation and seed_translation.strip():
+            candidates.append(_RealizationCandidate(seed_translation.strip(), ["seed_translation"]))
+
+        proposition = representation.propositions[0] if representation.propositions else {}
+        role = str(proposition.get("semanticRole") or proposition.get("relationship") or "")
+        if not role:
+            return candidates
+
+        if representation.discourse_role == "direct_address":
+            candidates.extend(self._direct_address_candidates(representation, role, pronoun_plan))
+        elif proposition.get("type") == "relationship_assertion":
+            candidates.extend(self._relationship_assertion_candidates(representation, role, pronoun_plan))
+        elif representation.discourse_role in {"subject_or_object_reference", "third_person_reference"}:
+            candidates.extend(self._reference_candidates(representation, role))
+
+        unique: dict[str, _RealizationCandidate] = {}
+        for candidate in candidates:
+            if candidate.translation:
+                unique.setdefault(candidate.translation, candidate)
+        return list(unique.values())
+
+    def _direct_address_candidates(
+        self,
+        representation: SourceSemanticRepresentation,
+        role: str,
+        pronoun_plan: PronounPlan | None,
+    ) -> list[_RealizationCandidate]:
+        vocative = _direct_vocative(role, pronoun_plan)
+        body = _direct_address_body(representation.source_text, role, pronoun_plan)
+        if not vocative:
+            return []
+        return [
+            _RealizationCandidate(f"{vocative}, {body}", ["direct_address", "semantic_vocative"]),
+            _RealizationCandidate(f"{vocative}, {body}", ["candidate_internal_variant"]),
+        ]
+
+    def _relationship_assertion_candidates(
+        self,
+        representation: SourceSemanticRepresentation,
+        role: str,
+        pronoun_plan: PronounPlan | None,
+    ) -> list[_RealizationCandidate]:
+        if any(token in representation.source_text for token in ("已经回来了", "已經回來了", "回来了", "回來了")):
+            owner = _owner_pronoun(pronoun_plan)
+            noun = _relationship_noun(role)
+            if noun:
+                return [
+                    _RealizationCandidate(
+                        f"{noun[:1].upper() + noun[1:]} của {owner} đã về rồi.",
+                        ["possessive_relationship", "subject_reference"],
+                    )
+                ]
+
+        relative_to = _relationship_owner(proposition=representation.propositions[0])
+        if relative_to == "third_person":
+            subject = _owner_pronoun(pronoun_plan).capitalize()
+            owner = _third_person_subject(role).casefold()
+            noun = _relationship_noun(role)
+            if noun:
+                return [
+                    _RealizationCandidate(
+                        f"{subject} là {noun} của {owner}.",
+                        ["possessive_relationship", "explicit_owner"],
+                    )
+                ]
+
+        owner = _owner_pronoun(pronoun_plan)
+        third = _third_person_subject(role)
+        noun = _relationship_noun(role)
+        if not third or not noun:
+            return []
+        candidates = [
+            _RealizationCandidate(
+                f"{third} là {noun} của {owner}.",
+                ["possessive_relationship", "explicit_owner"],
+            )
+        ]
+        if role in {"older_sister", "older_brother"}:
+            compact_noun = "chị" if role == "older_sister" else "anh"
+            candidates.append(
+                _RealizationCandidate(
+                    f"{third} là {compact_noun} của {owner}.",
+                    ["possessive_relationship", "compact_kinship"],
+                )
+            )
+        return candidates
+
+    def _reference_candidates(
+        self,
+        representation: SourceSemanticRepresentation,
+        role: str,
+    ) -> list[_RealizationCandidate]:
+        subject = _direct_vocative(role, None) or _relationship_noun(role)
+        if not subject:
+            return []
+        if any(token in representation.source_text for token in ("来了", "來了")):
+            return [_RealizationCandidate(f"{subject}, đến rồi.", ["subject_reference"])]
+        if any(token in representation.source_text for token in ("回来", "回來")):
+            return [_RealizationCandidate(f"{subject} đã về rồi.", ["subject_reference"])]
+        return [_RealizationCandidate(subject, ["relationship_reference"])]
+
+    def _repair_candidates(
+        self,
+        *,
+        representation: SourceSemanticRepresentation,
+        failed: _RealizationCandidate,
+        issues: list[str],
+        pronoun_plan: PronounPlan | None,
+    ) -> list[_RealizationCandidate]:
+        _ = failed
+        proposition = representation.propositions[0] if representation.propositions else {}
+        role = str(proposition.get("semanticRole") or proposition.get("relationship") or "")
+        if not role:
+            return []
+        if "RELATIONSHIP_REALIZATION_ERROR" in issues or "POSSESSION_ERROR" in issues:
+            return self._relationship_assertion_candidates(representation, role, pronoun_plan)
+        if "DIRECT_ADDRESS_ERROR" in issues:
+            return self._direct_address_candidates(representation, role, pronoun_plan)
+        return []
+
+    def _best_candidate(
+        self,
+        candidates: list[_RealizationCandidate],
+        representation: SourceSemanticRepresentation,
+        pronoun_plan: PronounPlan | None,
+    ) -> tuple[_RealizationCandidate, list[str]]:
+        scored: list[tuple[float, int, _RealizationCandidate, list[str]]] = []
+        for index, candidate in enumerate(candidates):
+            issues = realization_critic_issues(
+                source=representation.source_text,
+                translation=candidate.translation,
+                representation=representation,
+                pronoun_plan=pronoun_plan,
+            )
+            score = self._candidate_score(candidate, issues) - index * 0.001
+            scored.append((score, -index, candidate, issues))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        _score, _index, candidate, issues = scored[0]
+        return candidate, issues
+
+    def _candidate_score(self, candidate: _RealizationCandidate, issues: list[str]) -> float:
+        score = 1.0
+        score -= 0.22 * len(self._serious_issues(issues))
+        score -= 0.06 * (len(issues) - len(self._serious_issues(issues)))
+        if "explicit_owner" in candidate.notes:
+            score += 0.04
+        if "direct_address" in candidate.notes:
+            score += 0.04
+        if "seed_translation" in candidate.notes and issues:
+            score -= 0.08
+        return score
+
+    def _serious_issues(self, issues: list[str]) -> list[str]:
+        return [
+            issue
+            for issue in issues
+            if issue
+            in {
+                "RELATIONSHIP_REALIZATION_ERROR",
+                "POSSESSION_ERROR",
+                "DIRECT_ADDRESS_ERROR",
+                "RELATIONSHIP_INFORMATION_LOSS",
+                "UNSUPPORTED_PRONOUN_INFERENCE",
+                "TITLE_ROLE_ERROR",
+            }
+        ]
+
+    def _confidence_for_issues(self, issues: list[str]) -> float:
+        serious = self._serious_issues(issues)
+        if serious:
+            return 0.54
+        if issues:
+            return 0.76
+        return 0.92
 
 
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -283,12 +556,13 @@ def analyze_source_semantics(
             if term.category == "SOCIAL_KINSHIP_ADDRESS":
                 unresolved.append("kinship_vs_social_address_unresolved")
         elif _is_possessive_relationship(normalized, term):
+            owner = _possessive_relationship_owner(normalized, term)
             propositions.append(
                 {
                     "type": "relationship_assertion",
-                    "subject": "third_person" if _THIRD_PERSON_RE.search(normalized) else None,
+                    "subject": "first_person" if normalized.startswith("我") else ("third_person" if _THIRD_PERSON_RE.search(normalized) else None),
                     "relationship": term.canonical,
-                    "relativeTo": "speaker",
+                    "relativeTo": owner,
                     "category": term.category,
                     "source": term.source,
                 }
@@ -421,7 +695,11 @@ def realization_critic_issues(
                 issues.append("RELATIONSHIP_INFORMATION_LOSS")
             if _is_title_role(role) and _family_role_rendered(normalized_vi):
                 issues.append("TITLE_ROLE_ERROR")
-            if not _possession_rendered(normalized_vi, enforced=enforced):
+            if not _possession_rendered(
+                normalized_vi,
+                enforced=enforced,
+                relative_to=str(proposition.get("relativeTo") or "speaker"),
+            ):
                 issues.append("POSSESSION_ERROR")
             if not enforced and _unsupported_possessive_social_pronoun(normalized_vi):
                 issues.append("UNSUPPORTED_PRONOUN_INFERENCE")
@@ -463,6 +741,97 @@ def _representation_semantic_payload(representation: SourceSemanticRepresentatio
 
 def semantic_categories_for_terms(text: str) -> list[dict[str, Any]]:
     return [term.to_dict() for term in _extract_terms(_normalize_source(text))]
+
+
+def _owner_pronoun(pronoun_plan: PronounPlan | None) -> str:
+    if _has_enforced_plan(pronoun_plan) and pronoun_plan is not None:
+        if pronoun_plan.self_pronoun and "/" not in pronoun_plan.self_pronoun:
+            return pronoun_plan.self_pronoun
+    return "tôi"
+
+
+def _relationship_owner(proposition: dict[str, Any]) -> str:
+    return str(proposition.get("relativeTo") or "speaker")
+
+
+def _third_person_subject(role: str) -> str:
+    return {
+        "older_brother": "Anh ấy",
+        "younger_brother": "Cậu ấy",
+        "older_sister": "Cô ấy",
+        "younger_sister": "Cô ấy",
+        "mother": "Bà ấy",
+        "father": "Ông ấy",
+        "grandfather": "Ông ấy",
+        "grandmother": "Bà ấy",
+        "aunt_or_older_woman": "Bà ấy",
+        "uncle_or_older_man": "Ông ấy",
+        "teacher": "Người đó",
+        "doctor": "Người đó",
+        "police_officer": "Người đó",
+        "boss": "Ông ấy",
+        "executive": "Ông ấy",
+    }.get(role, "Người đó")
+
+
+def _relationship_noun(role: str) -> str:
+    return {
+        "older_brother": "anh trai",
+        "older_sister": "chị gái",
+        "younger_sister": "em gái",
+        "younger_brother": "em trai",
+        "mother": "mẹ",
+        "father": "bố",
+        "grandfather": "ông",
+        "grandmother": "bà",
+        "aunt_or_older_woman": "cô",
+        "uncle_or_older_man": "chú",
+        "teacher": "giáo viên",
+        "doctor": "bác sĩ",
+        "police_officer": "cảnh sát",
+        "boss": "sếp",
+        "executive": "giám đốc",
+    }.get(role, "")
+
+
+def _direct_vocative(role: str, pronoun_plan: PronounPlan | None) -> str:
+    if _has_enforced_plan(pronoun_plan) and pronoun_plan is not None:
+        if pronoun_plan.target_pronoun and "/" not in pronoun_plan.target_pronoun:
+            return pronoun_plan.target_pronoun[:1].upper() + pronoun_plan.target_pronoun[1:]
+    return {
+        "older_brother": "Anh",
+        "older_sister": "Chị",
+        "mother": "Mẹ",
+        "father": "Bố",
+        "grandfather": "Ông",
+        "grandmother": "Bà",
+        "aunt_or_older_woman": "Cô",
+        "uncle_or_older_man": "Chú",
+        "teacher": "Thầy",
+        "doctor": "Bác sĩ",
+        "police_officer": "Cảnh sát",
+        "boss": "Sếp",
+        "executive": "Sếp",
+    }.get(role, "")
+
+
+def _direct_address_body(
+    source_text: str,
+    role: str,
+    pronoun_plan: PronounPlan | None,
+) -> str:
+    self_ref = _owner_pronoun(pronoun_plan)
+    if any(token in source_text for token in ("过来一下", "過來一下")):
+        return "lại đây một chút."
+    if any(token in source_text for token in ("听我说", "聽我說")):
+        return f"nghe {self_ref} nói."
+    if any(token in source_text for token in ("等一下", "等一等")):
+        return f"chờ {self_ref} một chút."
+    if any(token in source_text for token in ("有件事想说", "有件事想說")):
+        return f"{self_ref} có chuyện muốn nói."
+    if role in {"boss", "executive"}:
+        return f"{self_ref} có chuyện muốn nói."
+    return "nghe tôi nói."
 
 
 def _normalize_source(text: str) -> str:
@@ -521,7 +890,19 @@ def _discourse_role(text: str, terms: list[SemanticTerm]) -> str:
 def _is_possessive_relationship(text: str, term: SemanticTerm) -> bool:
     pattern = _POSSESSIVE_RE_TEMPLATE.format(term=re.escape(term.source))
     assertion = _ASSERTION_RE_TEMPLATE.format(term=re.escape(term.source))
-    return bool(re.search(pattern, text) or re.search(assertion, text))
+    third_owner = rf"(我).{{0,4}}是.{{0,3}}(她(?:的)?|他(?:的)?|她们(?:的)?|他们(?:的)?)(?P<term>{re.escape(term.source)})"
+    return bool(
+        re.search(pattern, text)
+        or re.search(assertion, text)
+        or re.search(third_owner, text)
+    )
+
+
+def _possessive_relationship_owner(text: str, term: SemanticTerm) -> str:
+    third_owner = rf"(我).{{0,4}}是.{{0,3}}(她(?:的)?|他(?:的)?|她们(?:的)?|他们(?:的)?)(?P<term>{re.escape(term.source)})"
+    if re.search(third_owner, text):
+        return "third_person"
+    return "speaker"
 
 
 def _ambiguity_score(
@@ -586,7 +967,24 @@ def _relationship_rendered(role: str, normalized_vi: str) -> bool:
     return bool(markers and any(marker in normalized_vi for marker in markers))
 
 
-def _possession_rendered(normalized_vi: str, *, enforced: bool) -> bool:
+def _possession_rendered(
+    normalized_vi: str,
+    *,
+    enforced: bool,
+    relative_to: str = "speaker",
+) -> bool:
+    if relative_to == "third_person":
+        if any(
+            marker in normalized_vi
+            for marker in (
+                "của cô ấy",
+                "của anh ấy",
+                "của ông ấy",
+                "của bà ấy",
+                "của người đó",
+            )
+        ):
+            return True
     if "của tôi" in normalized_vi or "của ta" in normalized_vi or "của mình" in normalized_vi:
         return True
     if enforced and any(f"của {word}" in normalized_vi for word in _SOCIAL_PRONOUNS):

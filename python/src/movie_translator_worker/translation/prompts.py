@@ -296,7 +296,7 @@ def user_prompt_v3(
         "When automaticPronounPlan.enforce is true, treat self_pronoun and target_pronoun as strong constraints for the CURRENT speaker's line.\n"
         "When automaticPronounPlan.context_request is true, use broader dialogue context and avoid hard-coding a risky pronoun; omit pronouns naturally if needed.\n"
         "Rows may also include speakerId such as speaker_001/speaker_002. Use speakerId only as a stable dialogue turn label; do not infer real names, gender, or relationships from it.\n"
-        "TRANSLATION_MEMORY may include movieSummary, currentScenes, characters, translationUnitContract, characterGraph, relationshipFact rows, addressPatterns, sceneRelationshipOverrides, pronounPlans, speakerCharacterMapping, knownNames, and previous translationMemory rows. Use it only to keep names, aliases, speaker continuity, scene meaning, and pronouns consistent.\n"
+        "TRANSLATION_MEMORY may include movieSummary, currentScenes, characters, translationUnitContract, characterGraph, characterContextStore, relationshipFact rows, addressPatterns, sceneRelationshipOverrides, pronounPlans, speakerCharacterMapping, knownNames, and previous translationMemory rows. Use it only to keep names, aliases, speaker continuity, scene meaning, and pronouns consistent.\n"
         "translationUnitContract lists target unit ids and read-only context unit ids. Translate target units only; context may clarify meaning but its unique content must not be absorbed, moved, deleted, or duplicated into a target result.\n"
         "Rows may include sourceUnit and ownership. ownership.sourceUnitIds are the content owned by this result; ownership.contextUnitIds are read-only evidence and never extra translation targets.\n"
         "Character and relationship memory is uncertain unless confidence is high. Do not invent gender, relationships, or real character names that are not present in the memory or dialogue.\n"
@@ -362,15 +362,12 @@ def system_prompt_v5(source_lang: str, target_lang: str) -> str:
     return (
         base
         + "\nPHASE 8 SEMANTIC REALIZATION:\n"
-        "- Preserve source meaning before naturalness or brevity.\n"
-        "- FIRST preserve exactly what the speaker asserts, asks, requests, or implies; ONLY THEN make it natural Vietnamese.\n"
-        "- Mandatory priority: core proposition, speech act/sentence mood, factual anchors/numbers, polarity, referents/entities, relationships, source certainty, context consistency, natural Vietnamese, tone, conciseness.\n"
+        "- Preserve source meaning before naturalness: proposition, speech act, anchors/numbers, polarity, referents, relationships, certainty, then tone.\n"
         "- Generate a faithful semantic Vietnamese baseline internally before naturalizing risky rows; naturalization must not change semantic anchors.\n"
         "- Never turn a source statement into a Vietnamese question, and never turn a real source question into a statement.\n"
         "- Preserve question type: why/who/what/where/when/how/how-many/yes-no/confirmation/rhetorical are not interchangeable.\n"
         "- Chinese modal particles (啊/吧/呢/嘛/哦/etc.) are not fixed Vietnamese particles. Analyze sentence function first; often the correct Vietnamese output has no explicit particle.\n"
         "- Do not append à/hả/sao/ư/nhỉ/nhé/chứ unless the source sentence function or strong context justifies that exact pragmatic meaning.\n"
-        "- Preserve numbers, units, quantities, durations, time, polarity, predicate, certainty, and aspect exactly.\n"
         "- If source text or ASR is uncertain, become more literal and conservative instead of inventing a likely movie line.\n"
         "- Do not invent gendered wording such as lấy chồng/lấy vợ/bạn trai/bạn gái unless source or high-confidence context supports it.\n"
         "- Final subtitles must never contain translator commentary, options, candidates, explanations, or meta text such as 'cần dịch lại'.\n"
@@ -381,6 +378,16 @@ def system_prompt_v5(source_lang: str, target_lang: str) -> str:
         "- Relationship memory stores source facts and evidence. Previous Vietnamese translations are style hints only and must not override current source evidence.\n"
         "- For high-risk rows, you may reason internally over 2-3 candidates, but return only the best JSON translation.\n"
         "- Candidate alternatives are internal only. Never output slash-separated alternatives, Option A/B/C, commentary, or multiple translations for one id.\n"
+        "\nPHASE 9 SPEAKER / CHARACTER / PRONOUN CONTEXT:\n"
+        "- Treat speakerId as a stable diarized voice identity across subtitle rows; do not invent a new character per line.\n"
+        "- Use characterContextStore when present: speaker profiles, character ids, gender hints, listener confidence, relationships, and pronoun mappings are video-scoped context.\n"
+        "- Gender hints can be male, female, unknown, or uncertain. Never convert gender directly into Vietnamese pronouns; pronouns are pair-based social choices.\n"
+        "- Established pronoun mappings are relative to a speaker/listener character pair. Reuse high-confidence mappings unless current source/context clearly changes the relationship or address mode.\n"
+        "- If listener, gender, or relationship confidence is low, prefer neutral/natural Vietnamese or omit pronouns where idiomatic; do not guess anh/chị/em/con/cháu.\n"
+        "- Do not let pronoun mappings from one character pair leak into another pair or scene.\n"
+        "\nPHASE 10 MULTIMODAL IDENTITY:\n"
+        "- Use compact resolved character/listener/visible/offscreen identity facts when present; ignore raw embeddings.\n"
+        "- Keep speaker, face-track, and character IDs separate. Unknown visual identity is allowed.\n"
     )
 
 

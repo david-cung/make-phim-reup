@@ -51,6 +51,7 @@ SERIOUS_REASON_FLAGS = {
     "POSSIBLE_HALLUCINATION",
     "POSSIBLE_CHARACTER_REFERENCE_CONFLICT",
     "POSSIBLE_GLOBAL_INCONSISTENCY",
+    "PRONOUN_OUTLIER",
 }.union(SEMANTIC_ERROR_CODES)
 SERIOUS_REASON_FLAGS = SERIOUS_REASON_FLAGS.union(INTEGRITY_ERROR_CODES)
 
@@ -79,6 +80,87 @@ SEMANTIC_REVISION_FLAGS = {
     "POSSIBLE_CHARACTER_REFERENCE_CONFLICT",
     "POSSIBLE_GLOBAL_INCONSISTENCY",
 }.union(SERIOUS_REASON_FLAGS)
+
+
+class PronounConsistencyValidator:
+    """Validate Vietnamese address forms against pair-based movie memory."""
+
+    def validate(
+        self,
+        *,
+        segment_id: int,
+        source: str,
+        translation: str,
+        memory: TranslationMemory,
+    ) -> list[str]:
+        if _source_supports_pronoun_shift(source):
+            return []
+        mapping = memory.pronoun_mapping_for_segment(segment_id)
+        if mapping is None or mapping.confidence < PRONOUN_PLAN_ENFORCE_THRESHOLD:
+            return memory.address_consistency_issues(
+                segment_id=segment_id,
+                source=source,
+                translation=translation,
+            )
+        expected = {
+            item.casefold()
+            for item in (mapping.self_pronoun, mapping.listener_pronoun)
+            if item and "/" not in item
+        }
+        if not expected:
+            return []
+        words = _social_pronouns(translation)
+        if not words:
+            return []
+        issues: list[str] = []
+        unexpected = [word for word in words if word not in expected]
+        if unexpected:
+            issues.append("ADDRESS_PAIR_INCONSISTENCY")
+            issues.append("UNJUSTIFIED_ADDRESS_SHIFT")
+            if any(word in {"anh", "chị", "em", "con", "mẹ", "bố", "ba"} for word in unexpected):
+                issues.append("UNSUPPORTED_SOCIAL_PRONOUN")
+        return list(dict.fromkeys(issues))
+
+    def global_outliers(
+        self,
+        *,
+        translations: dict[int, TranslationResult],
+        memory: TranslationMemory,
+    ) -> dict[int, list[str]]:
+        buckets: dict[tuple[str, str], dict[tuple[str, ...], list[int]]] = {}
+        speaker_buckets: dict[str, dict[tuple[str, ...], list[int]]] = {}
+        for sid, result in translations.items():
+            plan = memory.pronoun_plan_for_segment(sid)
+            forms = tuple(_social_pronouns(result.translation))
+            if forms and plan is not None and plan.speaker:
+                speaker_buckets.setdefault(plan.speaker, {}).setdefault(forms, []).append(sid)
+            mapping = memory.pronoun_mapping_for_segment(sid)
+            if mapping is None or mapping.confidence < PRONOUN_PLAN_ENFORCE_THRESHOLD:
+                continue
+            if not forms:
+                continue
+            key = (mapping.speaker_character_id, mapping.listener_character_id)
+            buckets.setdefault(key, {}).setdefault(forms, []).append(sid)
+
+        issues: dict[int, list[str]] = {}
+        for forms_by_pair in list(buckets.values()) + list(speaker_buckets.values()):
+            total = sum(len(ids) for ids in forms_by_pair.values())
+            if total < 6 or len(forms_by_pair) <= 1:
+                continue
+            dominant, dominant_ids = max(
+                forms_by_pair.items(),
+                key=lambda item: len(item[1]),
+            )
+            if len(dominant_ids) < max(4, int(total * 0.70)):
+                continue
+            for forms, ids in forms_by_pair.items():
+                if forms == dominant:
+                    continue
+                for sid in ids:
+                    issues.setdefault(sid, []).extend(
+                        ["PRONOUN_OUTLIER", "ADDRESS_PAIR_INCONSISTENCY"]
+                    )
+        return {sid: list(dict.fromkeys(flags)) for sid, flags in issues.items()}
 
 
 def needs_retry(result: str | TranslationResult, options: TranslateOptions) -> bool:
@@ -381,10 +463,11 @@ def semantic_issues(
         )
     )
     issues.extend(
-        memory.address_consistency_issues(
+        PronounConsistencyValidator().validate(
             segment_id=segment_id,
             source=source,
             translation=translation,
+            memory=memory,
         )
     )
     return list(dict.fromkeys(issues))
@@ -458,6 +541,11 @@ def global_consistency_issues(
     memory: TranslationMemory,
 ) -> dict[int, list[str]]:
     issues: dict[int, list[str]] = {}
+    for sid, flags in PronounConsistencyValidator().global_outliers(
+        translations=translations,
+        memory=memory,
+    ).items():
+        issues.setdefault(sid, []).extend(flags)
     for sid, flags in duplicate_translation_issues(translations, segments_by_id).items():
         issues.setdefault(sid, []).extend(flags)
     name_forms: dict[str, dict[str, list[int]]] = {}
@@ -701,6 +789,30 @@ def _vi_words(text: str) -> list[str]:
         if token:
             words.append(token)
     return words
+
+
+def _social_pronouns(text: str) -> list[str]:
+    found: list[str] = []
+    for word in (item.casefold() for item in _vi_words(text)):
+        if word in _KNOWN_VI_PRONOUNS and word not in {"tôi", "mình"}:
+            found.append(word)
+    return found
+
+
+def _social_pronoun_pair(text: str) -> tuple[str, str] | None:
+    found = _social_pronouns(text)
+    if len(found) < 2:
+        return None
+    return found[0], found[1]
+
+
+def _source_supports_pronoun_shift(source: str) -> bool:
+    return bool(
+        re.search(
+            r"(别叫|不要叫|不许叫|改口|陌生人|先生|小姐|警官|医生|分手|滚)",
+            source,
+        )
+    )
 
 
 _KNOWN_VI_PRONOUNS = {

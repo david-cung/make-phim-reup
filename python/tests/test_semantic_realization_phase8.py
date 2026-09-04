@@ -8,6 +8,7 @@ from movie_translator_worker.translation.models import (
 )
 from movie_translator_worker.translation.quality import semantic_validate_result
 from movie_translator_worker.translation.semantic_realization import (
+    ContextualVietnameseRealizer,
     analyze_source_semantics,
     compact_semantic_payload,
     realization_critic_issues,
@@ -187,3 +188,60 @@ def test_current_source_evidence_overrides_conflicting_translation_style_memory(
     )
 
     assert "UNSUPPORTED_PRONOUN_INFERENCE" in result.metadata.reason_flags
+
+
+def test_contextual_realizer_separates_sister_statement_from_direct_address() -> None:
+    realizer = ContextualVietnameseRealizer()
+
+    statement = realizer.realize(
+        representation=analyze_source_semantics(
+            segment_id=1,
+            source="她是我的姐姐。",
+        )
+    ).to_dict()
+    direct = realizer.realize(
+        representation=analyze_source_semantics(
+            segment_id=2,
+            source="姐姐，你过来一下。",
+        )
+    ).to_dict()
+
+    assert statement["translation"] == "Cô ấy là chị gái của tôi."
+    assert direct["translation"] == "Chị, lại đây một chút."
+    assert statement["realization_notes"] != direct["realization_notes"]
+    assert statement["confidence"] >= 0.9
+    assert direct["confidence"] >= 0.9
+
+
+def test_contextual_realizer_repairs_bad_seed_relationship_pronoun() -> None:
+    realizer = ContextualVietnameseRealizer()
+    result = realizer.realize(
+        representation=analyze_source_semantics(
+            segment_id=1,
+            source="她是我的姐姐。",
+        ),
+        seed_translation="Chị ấy là chị em.",
+    )
+
+    assert result.translation == "Cô ấy là chị gái của tôi."
+    assert "self_repair_attempts:1" in result.realization_notes
+    assert result.confidence >= 0.9
+
+
+def test_contextual_realizer_handles_required_phase8_relationship_examples() -> None:
+    realizer = ContextualVietnameseRealizer()
+    examples = {
+        "我是她妹妹。": "Tôi là em gái của cô ấy.",
+        "我哥已经回来了。": "Anh trai của tôi đã về rồi.",
+        "她是我妈。": "Bà ấy là mẹ của tôi.",
+        "妈，你听我说。": "Mẹ, nghe tôi nói.",
+        "他是我的老板。": "Ông ấy là sếp của tôi.",
+        "老板，我有件事想说。": "Sếp, tôi có chuyện muốn nói.",
+    }
+
+    for source, expected in examples.items():
+        result = realizer.realize(
+            representation=analyze_source_semantics(segment_id=1, source=source)
+        )
+        assert result.translation == expected
+        assert "seed_translation" not in result.realization_notes

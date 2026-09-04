@@ -877,7 +877,7 @@ class LlamaCppTranslationProvider(TranslationProvider):
                     memory=memory,
                     revision_attempt=retry_index + 1,
                 )
-                if _score_result(candidate) >= _score_result(previous):
+                if _score_result(candidate) > _score_result(previous):
                     translations[sid] = candidate
         return self._validate_chunk_results(
             chunk=chunk,
@@ -1392,11 +1392,11 @@ def _looks_like_bad_vietnamese_translation(source: str, translation: str) -> boo
     stripped = translation.strip()
     if not stripped:
         return True
-
-    cjk_count = len(_CJK_RE.findall(stripped))
-    non_space = sum(1 for ch in stripped if not ch.isspace())
-    if cjk_count >= 2 and cjk_count / max(1, non_space) > 0.15:
-        return True
+    if _CJK_RE.search(source):
+        cjk_count = len(_CJK_RE.findall(stripped))
+        non_space = sum(1 for ch in stripped if not ch.isspace())
+        if cjk_count >= 2 and cjk_count / max(1, non_space) > 0.15:
+            return True
     if _TRANSLATOR_META_RE.search(stripped.casefold()):
         return True
 

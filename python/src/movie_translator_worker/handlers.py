@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,7 @@ def initialize(params: dict[str, Any]) -> dict[str, Any]:
         os.environ["LMT_WORKER_LOG_LEVEL"] = log_level.upper()
         log.reload_level()
     if isinstance(data_root, str):
-        os.environ["LMT_DATA_DIR"] = data_root
+        os.environ["LMT_DATA_DIR"] = str(_normalise_host_path(data_root))
 
     models_root = params.get("models_root")
     if isinstance(models_root, str) and models_root:
@@ -113,6 +114,16 @@ def _resolve_models_root() -> Path:
     if data_dir:
         return Path(data_dir) / "models"
     return Path.home() / ".cache" / "movie-translator" / "models"
+
+
+def _normalise_host_path(value: str) -> Path:
+    path = Path(value)
+    if os.name == "nt":
+        normalized = value.replace("\\", "/")
+        if normalized == "/tmp" or normalized.startswith("/tmp/"):
+            suffix = normalized.removeprefix("/tmp").lstrip("/")
+            return Path(tempfile.gettempdir()) / suffix
+    return path
 
 
 def ping(_params: dict[str, Any]) -> dict[str, Any]:

@@ -310,6 +310,155 @@ class PronounPlan:
 
 
 @dataclass
+class SpeakerProfile:
+    speaker_id: str
+    character_id: str | None = None
+    gender_hint: str = "unknown"
+    gender_confidence: float = 0.0
+    dialogue_segment_ids: list[int] = field(default_factory=list)
+    voice_evidence: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "speaker_id": self.speaker_id,
+            "character_id": self.character_id,
+            "gender_hint": self.gender_hint,
+            "gender_confidence": round(float(self.gender_confidence), 3),
+            "dialogue_segment_ids": [
+                f"segment_{sid}" for sid in self.dialogue_segment_ids[:24]
+            ],
+            "voice_evidence": dict(self.voice_evidence),
+        }
+
+
+@dataclass
+class PronounMapping:
+    speaker_character_id: str
+    listener_character_id: str
+    self_pronoun: str | None = None
+    listener_pronoun: str | None = None
+    relationship: str = "unknown"
+    confidence: float = 0.0
+    evidence: list[str] = field(default_factory=list)
+    last_updated_segment_id: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "speaker_character_id": self.speaker_character_id,
+            "listener_character_id": self.listener_character_id,
+            "self_pronoun": self.self_pronoun,
+            "listener_pronoun": self.listener_pronoun,
+            "relationship": self.relationship,
+            "confidence": round(float(self.confidence), 3),
+            "evidence": list(self.evidence[:8]),
+        }
+        if self.last_updated_segment_id is not None:
+            payload["last_updated"] = f"segment_{self.last_updated_segment_id}"
+        return payload
+
+
+@dataclass
+class CharacterContext:
+    character_id: str
+    associated_speaker_ids: list[str] = field(default_factory=list)
+    gender_hint: str = "unknown"
+    gender_confidence: float = 0.0
+    age_role_hints: list[str] = field(default_factory=list)
+    dialogue_segment_ids: list[int] = field(default_factory=list)
+    known_relationships: list[str] = field(default_factory=list)
+    established_pronoun_mappings: list[PronounMapping] = field(default_factory=list)
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "character_id": self.character_id,
+            "associated_speaker_ids": list(self.associated_speaker_ids),
+            "gender_hint": self.gender_hint,
+            "gender_confidence": round(float(self.gender_confidence), 3),
+            "age_role_hints": list(self.age_role_hints),
+            "dialogue_segment_ids": [
+                f"segment_{sid}" for sid in self.dialogue_segment_ids[:24]
+            ],
+            "known_relationships": list(dict.fromkeys(self.known_relationships)),
+            "established_pronoun_mappings": [
+                mapping.to_dict() for mapping in self.established_pronoun_mappings[:12]
+            ],
+            "confidence": round(float(self.confidence), 3),
+        }
+
+
+@dataclass
+class CharacterContextStore:
+    video_scope_id: str = "current_video"
+    speaker_profiles: dict[str, SpeakerProfile] = field(default_factory=dict)
+    character_contexts: dict[str, CharacterContext] = field(default_factory=dict)
+    pronoun_mappings: list[PronounMapping] = field(default_factory=list)
+    multimodal_extension_points: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "video_scope_id": self.video_scope_id,
+            "speaker_profiles": [
+                profile.to_dict() for profile in self.speaker_profiles.values()
+            ],
+            "character_contexts": [
+                context.to_dict() for context in self.character_contexts.values()
+            ],
+            "pronoun_mappings": [
+                mapping.to_dict() for mapping in self.pronoun_mappings
+            ],
+            "multimodal_extension_points": dict(self.multimodal_extension_points),
+        }
+
+    def relevant_payload(
+        self,
+        *,
+        character_ids: set[str],
+        speaker_ids: set[str],
+    ) -> dict[str, Any]:
+        profiles = [
+            profile.to_dict()
+            for speaker, profile in self.speaker_profiles.items()
+            if speaker in speaker_ids or (profile.character_id in character_ids)
+        ]
+        contexts = [
+            context.to_dict()
+            for cid, context in self.character_contexts.items()
+            if cid in character_ids
+        ]
+        mappings = [
+            mapping.to_dict()
+            for mapping in self.pronoun_mappings
+            if mapping.speaker_character_id in character_ids
+            and mapping.listener_character_id in character_ids
+        ][:20]
+        return {
+            "video_scope_id": self.video_scope_id,
+            "speaker_profiles": profiles[:12],
+            "character_contexts": contexts[:12],
+            "pronoun_mappings": mappings,
+            "multimodal_extension_points": dict(self.multimodal_extension_points),
+        }
+
+    def pronoun_mapping_for(
+        self,
+        speaker_character_id: str | None,
+        listener_character_id: str | None,
+    ) -> PronounMapping | None:
+        if not speaker_character_id or not listener_character_id:
+            return None
+        matches = [
+            mapping
+            for mapping in self.pronoun_mappings
+            if mapping.speaker_character_id == speaker_character_id
+            and mapping.listener_character_id == listener_character_id
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda item: item.confidence)
+
+
+@dataclass
 class GraphEvidence:
     segment_id: int
     source_text: str = ""
@@ -576,6 +725,7 @@ class MovieMemory:
     )
     pronoun_plans: dict[int, PronounPlan] = field(default_factory=dict)
     character_graph: CharacterGraph | None = None
+    character_context_store: CharacterContextStore | None = None
 
     def relevant_payload(
         self,
@@ -630,6 +780,14 @@ class MovieMemory:
             if self.character_graph is not None
             else None
         )
+        store_payload = (
+            self.character_context_store.relevant_payload(
+                character_ids=character_ids,
+                speaker_ids=current_speakers,
+            )
+            if self.character_context_store is not None
+            else None
+        )
         return {
             "movieSummary": self.movie_summary,
             "currentScenes": [scene.to_dict() for scene in scenes[:3]],
@@ -638,6 +796,7 @@ class MovieMemory:
             "sceneRelationshipOverrides": scene_relationship_rows,
             "pronounPlans": pronoun_plans,
             "characterGraph": graph_payload,
+            "characterContextStore": store_payload,
             "speakerCharacterMapping": {
                 speaker: character_id
                 for speaker, character_id in self.speaker_character_mapping.items()
@@ -667,6 +826,11 @@ class MovieMemory:
             "character_graph": (
                 self.character_graph.to_dict()
                 if self.character_graph is not None
+                else None
+            ),
+            "character_context_store": (
+                self.character_context_store.to_dict()
+                if self.character_context_store is not None
                 else None
             ),
         }
@@ -761,10 +925,24 @@ class TranslationMemory:
             plan.scene_id,
         )
 
+    def pronoun_mapping_for_segment(self, segment_id: int) -> PronounMapping | None:
+        if self.movie_memory is None or self.movie_memory.character_context_store is None:
+            return None
+        plan = self.pronoun_plan_for_segment(segment_id)
+        if plan is None:
+            return None
+        return self.movie_memory.character_context_store.pronoun_mapping_for(
+            plan.speaker,
+            plan.listener,
+        )
+
     def address_debug_for_segment(self, segment_id: int) -> dict[str, Any]:
         plan = self.pronoun_plan_for_segment(segment_id)
         pattern = self.address_pattern_for_segment(segment_id)
+        pronoun_mapping = self.pronoun_mapping_for_segment(segment_id)
         relationship = None
+        speaker_profile = None
+        listener_profile = None
         if self.movie_memory is not None and plan is not None:
             relationship = _relationship_for_pair(
                 self.movie_memory,
@@ -772,14 +950,37 @@ class TranslationMemory:
                 plan.listener,
                 plan.scene_id,
             )
+            store = self.movie_memory.character_context_store
+            if store is not None:
+                speaker_profile = _speaker_profile_for_character(store, plan.speaker)
+                listener_profile = _speaker_profile_for_character(store, plan.listener)
         return {
             "speaker": plan.speaker if plan is not None else None,
             "listener": plan.listener if plan is not None else None,
+            "speaker_gender_hint": (
+                speaker_profile.gender_hint if speaker_profile is not None else "unknown"
+            ),
+            "speaker_gender_confidence": (
+                round(float(speaker_profile.gender_confidence), 3)
+                if speaker_profile is not None
+                else 0.0
+            ),
+            "listener_gender_hint": (
+                listener_profile.gender_hint if listener_profile is not None else "unknown"
+            ),
+            "listener_gender_confidence": (
+                round(float(listener_profile.gender_confidence), 3)
+                if listener_profile is not None
+                else 0.0
+            ),
             "relationship": relationship.relationship if relationship is not None else None,
             "relationship_confidence": (
                 round(float(relationship.confidence), 3)
                 if relationship is not None
                 else 0.0
+            ),
+            "pronoun_mapping": (
+                pronoun_mapping.to_dict() if pronoun_mapping is not None else None
             ),
             "address_pair": (
                 [pattern.speaker_self_form, pattern.listener_form]
@@ -918,8 +1119,105 @@ def build_movie_memory(segments: list[TranslatedSegment]) -> MovieMemory:
     )
     memory.scenes = build_scene_memory(ordered, memory)
     _infer_relationship_memory(ordered, memory)
+    _infer_character_attributes_from_relationships(memory)
+    memory.character_context_store = build_character_context_store(ordered, memory)
     memory.character_graph = build_character_graph(ordered, memory)
     return memory
+
+
+def build_character_context_store(
+    segments: list[TranslatedSegment],
+    movie_memory: MovieMemory,
+) -> CharacterContextStore:
+    speaker_segments = _collect_speaker_segments(segments)
+    store = CharacterContextStore(
+        multimodal_extension_points={
+            "audio": {
+                "speaker_diarization": "available",
+                "voice_embedding": "reserved",
+                "voice_characteristics": "reserved",
+            },
+            "video": {
+                "face_detection": "not_available",
+                "face_tracking": "not_available",
+                "active_speaker_detection": "not_available",
+            },
+            "future_mapping": "speaker_id + face_track_id + active_speaker_evidence -> character_id",
+        }
+    )
+
+    for speaker_id, speaker_lines in speaker_segments.items():
+        character_id = movie_memory.speaker_character_mapping.get(speaker_id)
+        character = _character_by_id(movie_memory, character_id)
+        gender_hint, gender_confidence = _gender_hint_for_character(character)
+        store.speaker_profiles[speaker_id] = SpeakerProfile(
+            speaker_id=speaker_id,
+            character_id=character_id,
+            gender_hint=gender_hint,
+            gender_confidence=gender_confidence,
+            dialogue_segment_ids=[seg.id for seg in speaker_lines],
+            voice_evidence={
+                "diarization_segment_count": len(speaker_lines),
+                "mean_speaker_confidence": _mean_speaker_confidence(speaker_lines),
+            },
+        )
+
+    relationships: list[RelationshipMemory] = []
+    relationships.extend(movie_memory.relationships)
+    for rows in movie_memory.scene_relationship_overrides.values():
+        relationships.extend(rows)
+
+    mapping_by_pair: dict[tuple[str, str, str | None, str | None], PronounMapping] = {}
+    for relationship in relationships:
+        mapping = _pronoun_mapping_from_relationship(relationship)
+        if mapping is None:
+            continue
+        key = (
+            mapping.speaker_character_id,
+            mapping.listener_character_id,
+            mapping.self_pronoun,
+            mapping.listener_pronoun,
+        )
+        existing = mapping_by_pair.get(key)
+        if existing is None or mapping.confidence > existing.confidence:
+            mapping_by_pair[key] = mapping
+    store.pronoun_mappings = sorted(
+        mapping_by_pair.values(),
+        key=lambda item: (
+            item.speaker_character_id,
+            item.listener_character_id,
+            -item.confidence,
+        ),
+    )
+
+    segment_ids_by_character: dict[str, list[int]] = {}
+    for speaker_id, lines in speaker_segments.items():
+        character_id = movie_memory.speaker_character_mapping.get(speaker_id)
+        if character_id is None:
+            continue
+        segment_ids_by_character.setdefault(character_id, []).extend(seg.id for seg in lines)
+
+    for character in movie_memory.characters:
+        mappings = [
+            mapping
+            for mapping in store.pronoun_mappings
+            if mapping.speaker_character_id == character.id
+            or mapping.listener_character_id == character.id
+        ]
+        store.character_contexts[character.id] = CharacterContext(
+            character_id=character.id,
+            associated_speaker_ids=list(character.speaker_ids),
+            gender_hint=character.gender,
+            gender_confidence=float(character.confidence_details.get("gender", 0.0)),
+            age_role_hints=list(dict.fromkeys(character.roles + ([character.age_group] if character.age_group else []))),
+            dialogue_segment_ids=sorted(set(segment_ids_by_character.get(character.id, []))),
+            known_relationships=[
+                mapping.relationship for mapping in mappings if mapping.relationship != "unknown"
+            ],
+            established_pronoun_mappings=mappings,
+            confidence=character.confidence,
+        )
+    return store
 
 
 def build_scene_memory(
@@ -1070,6 +1368,193 @@ def _address_pattern_from_relationship(
         ],
         scene_scope=relationship.scene_id,
         source="relationship_fact",
+    )
+
+
+def _pronoun_mapping_from_relationship(
+    relationship: RelationshipMemory,
+) -> PronounMapping | None:
+    self_ref = relationship.addressing.get("from_self")
+    target_ref = relationship.addressing.get("from_target")
+    if not self_ref and not target_ref:
+        return None
+    last_segment = max(relationship.evidence_segments) if relationship.evidence_segments else None
+    return PronounMapping(
+        speaker_character_id=relationship.from_character,
+        listener_character_id=relationship.to_character,
+        self_pronoun=self_ref,
+        listener_pronoun=target_ref,
+        relationship=relationship.relationship,
+        confidence=min(0.96, max(0.0, relationship.confidence)),
+        evidence=[
+            "source_dialogue",
+            relationship.evidence_kind,
+            relationship.relation_domain,
+        ],
+        last_updated_segment_id=last_segment,
+    )
+
+
+def _infer_character_attributes_from_relationships(movie_memory: MovieMemory) -> None:
+    relationships: list[RelationshipMemory] = []
+    relationships.extend(movie_memory.relationships)
+    for rows in movie_memory.scene_relationship_overrides.values():
+        relationships.extend(rows)
+    by_id = {character.id: character for character in movie_memory.characters}
+    for relationship in relationships:
+        confidence = min(0.92, max(0.0, relationship.confidence))
+        from_gender, from_role = _gender_role_from_relation(
+            relationship.relationship,
+            perspective="from",
+        )
+        to_gender, to_role = _gender_role_from_relation(
+            relationship.relationship,
+            perspective="to",
+        )
+        if from_gender:
+            _update_character_gender(by_id.get(relationship.from_character), from_gender, confidence)
+        if to_gender:
+            _update_character_gender(by_id.get(relationship.to_character), to_gender, confidence)
+        if from_role:
+            _add_character_role(by_id.get(relationship.from_character), from_role)
+        if to_role:
+            _add_character_role(by_id.get(relationship.to_character), to_role)
+
+
+def _gender_role_from_relation(
+    relationship: str,
+    *,
+    perspective: str,
+) -> tuple[str | None, str | None]:
+    table: dict[str, dict[str, tuple[str | None, str | None]]] = {
+        "younger_to_older_brother": {
+            "from": (None, "younger_sibling"),
+            "to": ("male", "older_brother"),
+        },
+        "older_brother_to_younger": {
+            "from": ("male", "older_brother"),
+            "to": (None, "younger_sibling"),
+        },
+        "younger_to_older_sister": {
+            "from": (None, "younger_sibling"),
+            "to": ("female", "older_sister"),
+        },
+        "older_sister_to_younger": {
+            "from": ("female", "older_sister"),
+            "to": (None, "younger_sibling"),
+        },
+        "child_to_mother": {
+            "from": (None, "child"),
+            "to": ("female", "mother"),
+        },
+        "mother_to_child": {
+            "from": ("female", "mother"),
+            "to": (None, "child"),
+        },
+        "child_to_father": {
+            "from": (None, "child"),
+            "to": ("male", "father"),
+        },
+        "father_to_child": {
+            "from": ("male", "father"),
+            "to": (None, "child"),
+        },
+        "grandchild_to_grandfather": {
+            "from": (None, "grandchild"),
+            "to": ("male", "grandfather"),
+        },
+        "grandfather_to_grandchild": {
+            "from": ("male", "grandfather"),
+            "to": (None, "grandchild"),
+        },
+        "grandchild_to_grandmother": {
+            "from": (None, "grandchild"),
+            "to": ("female", "grandmother"),
+        },
+        "grandmother_to_grandchild": {
+            "from": ("female", "grandmother"),
+            "to": (None, "grandchild"),
+        },
+    }
+    return table.get(relationship, {}).get(perspective, (None, None))
+
+
+def _update_character_gender(
+    character: CharacterMemory | None,
+    gender: str,
+    confidence: float,
+) -> None:
+    if character is None or gender not in {"male", "female"}:
+        return
+    current_confidence = float(character.confidence_details.get("gender", 0.0))
+    if character.gender not in {"unknown", "uncertain", gender} and current_confidence >= confidence:
+        character.gender = "uncertain"
+        character.confidence_details["gender"] = max(current_confidence, confidence)
+        return
+    if confidence >= current_confidence:
+        character.gender = gender
+        character.confidence_details["gender"] = confidence
+
+
+def _add_character_role(character: CharacterMemory | None, role: str) -> None:
+    if character is None or not role:
+        return
+    if role not in character.roles:
+        character.roles.append(role)
+
+
+def _character_by_id(
+    movie_memory: MovieMemory,
+    character_id: str | None,
+) -> CharacterMemory | None:
+    if character_id is None:
+        return None
+    for character in movie_memory.characters:
+        if character.id == character_id:
+            return character
+    return None
+
+
+def _gender_hint_for_character(
+    character: CharacterMemory | None,
+) -> tuple[str, float]:
+    if character is None:
+        return "unknown", 0.0
+    confidence = float(character.confidence_details.get("gender", 0.0))
+    if character.gender in {"male", "female"} and confidence >= 0.55:
+        return character.gender, confidence
+    if character.gender in {"male", "female", "uncertain"}:
+        return "uncertain", min(confidence, 0.54)
+    return "unknown", 0.0
+
+
+def _mean_speaker_confidence(lines: list[TranslatedSegment]) -> float:
+    values = [
+        float(seg.speaker_confidence)
+        for seg in lines
+        if seg.speaker_confidence is not None
+    ]
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 3)
+
+
+def _speaker_profile_for_character(
+    store: CharacterContextStore,
+    character_id: str | None,
+) -> SpeakerProfile | None:
+    if character_id is None:
+        return None
+    profiles = [
+        profile
+        for profile in store.speaker_profiles.values()
+        if profile.character_id == character_id
+    ]
+    if not profiles:
+        return None
+    return max(
+        profiles,
+        key=lambda item: (item.gender_confidence, len(item.dialogue_segment_ids)),
     )
 
 
